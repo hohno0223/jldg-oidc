@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Token-only stdout for Gfarm. Never start an agent or prepare an account.
+if [[ $# != 0 ]]; then
+    printf '%s\n' 'Usage: jldg-token' >&2
+    exit 2
+fi
+
+# Capture stdout so a failed command cannot leak partial output as a token.
+# Keep the native error on stderr and leave application stdin untouched.
+token=$(oidc-token --time=60 jldg </dev/null)
+rc=$?
+if ((rc == 0)) && [[ -n $token ]]; then
+    printf '%s\n' "$token"
+    exit 0
+fi
+((rc != 0)) || rc=1
+printf '%s\n' 'JLDG token retrieval failed. Resolve the cause in a terminal, then retry:' \
+    '  Check your oidc-agent connection and the original error above.' \
+    '  Saved account not loaded: oidc-add --pw-prompt=cli --pw-store jldg' \
+    '  First registration or reauthentication required: jldg-auth' \
+    '  For network errors, restore connectivity before retrying.' >&2
+exit "$rc"

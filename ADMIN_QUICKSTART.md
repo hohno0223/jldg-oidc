@@ -1,53 +1,54 @@
-# JLDG oidc-agent helper 導入・動作確認（簡易版）
+# JLDG OIDC 認証補助 導入・動作確認（簡易版）
 
-標準の配置先 `/usr/local/share/jldg` を使う手順。動作確認は Bash で行う。設定理由やエラー時の調査は [詳細版](ADMIN_GUIDE.md) を参照する。
+配置先を `/usr/local/share/jldg` とする。設定理由や障害対応は [詳細版](ADMIN_GUIDE.md) を参照する。
 
-## 1. 事前準備
+## 1. 前提
 
-- 実行ホストに Linux、Bash、`stty`、oidc-agent **5 系**、Gfarm クライアントと XOAUTH2 を導入する。Gfarm は `JWT_USER_PATH` の `!コマンド` 形式に対応したものを使う。
-- OP に public client を登録し、authorization code flow・PKCE S256 と refresh token の発行を有効にする。issuer、scope、redirect URI は配布ファイル `jldg-client.json` と一致させ、登録済み client ID を用意する。
-- Gfarm の TLS・XOAUTH2・issuer・audience・ユーザー対応を設定し、読み取り確認用のディレクトリと小さなファイルを用意する。
-- 実行ホストから OP へ HTTPS 接続できることを確認する。別 PC のブラウザを使う場合は、PC から実行ホストへの SSH ローカル転送と SOCKS proxy 用の動的転送を使えることを確認する。
-- ブラウザを開くマシンには、JLDG の証明書がインストールされたブラウザを用意する。実行ホストと同じマシンのブラウザも使用できる。
-
-実行ホストで確認する。見つからないコマンドがあれば先に導入する。
+- Linux、Bash、stty、oidc-agent 5 系、Gfarm と XOAUTH2 を導入する。tcsh を使う利用者には tcsh も必要である。
+- Gfarm は `JWT_USER_PATH` の `!コマンド` 形式に対応した版を使う。
+- OP に public client を登録し、authorization code flow・PKCE S256 と refresh token 発行を有効にする。
+- Gfarm の TLS・issuer・audience・scope・ユーザー対応を設定し、読み取り用の検証ファイルを用意する。
+- 実行ホストから OP へ HTTPS 接続でき、JLDG の証明書がインストールされたブラウザを使えることを確認する。
 
 ```bash
-command -v bash stty oidc-agent-service oidc-agent oidc-gen oidc-add oidc-token grep tee cat dirname gfls gfexport
+command -v bash stty tee cat oidc-agent oidc-agent-service oidc-gen oidc-add oidc-token gfls gfexport
 oidc-agent --version
 ```
 
-**確認：すべてのコマンドが見つかり、oidc-agent は 5 系である。**
+## 2. 配置する（管理者）
 
-## 2. ファイルを配置する（管理者）
-
-配布ファイルのあるディレクトリで実行する。更新の場合は、先に配置先の既存ファイルと `/etc/oidc-agent/config` をバックアップする。
+既存の配置ファイル・シェル起動設定・`/etc/oidc-agent/config` をバックアップしてから実行する。
 
 ```bash
 sudo install -d -o root -g root -m 0755 /usr/local/share/jldg
-sudo install -o root -g root -m 0755 jldg-agent.sh jldg-agent.csh jldg-agent-core.sh /usr/local/share/jldg/
+sudo install -o root -g root -m 0755 jldg-auth jldg-token /usr/local/share/jldg/
+sudo install -o root -g root -m 0644 jldg-env.sh jldg-env.csh /usr/local/share/jldg/
 sudo install -d -o root -g root -m 0755 /etc/oidc-agent/issuer.config.d
-sudo install -o root -g root -m 0644 jldg-client.json /etc/oidc-agent/jldg-client.json
+sudo install -o root -g root -m 0644 jldg-auth.conf jldg-client.json /etc/oidc-agent/
 sudo install -o root -g root -m 0644 issuer.config.d/jldg /etc/oidc-agent/issuer.config.d/jldg
 (
-    for jldg_script in jldg-agent.sh jldg-agent.csh jldg-agent-core.sh; do
+    for jldg_script in jldg-auth jldg-token jldg-env.sh; do
         bash -n "/usr/local/share/jldg/$jldg_script" || exit
     done
+    bash -n /etc/oidc-agent/jldg-auth.conf
 )
 ```
 
-**確認：エラーが出ず、配置先は root 所有で一般利用者に書き込み権限がない。**
+ファイルは root 所有で一般利用者に書き込みを許さない。
 
 ## 3. 設定する（管理者）
 
 ```bash
 sudoedit /etc/oidc-agent/jldg-client.json
+sudoedit /etc/oidc-agent/jldg-auth.conf
 sudoedit /etc/oidc-agent/config
 ```
 
-`jldg-client.json` の `REPLACE_WITH_REGISTERED_JLDG_CLIENT_ID` を登録済み client ID に置き換える。他の値は OP の登録内容と照合する。
+クライアント JSON の client ID を登録済みの値に置き換え、issuer・scope・redirect URI を OP と一致させる。JSON は正しいことを前提とし、helper は構文検査しない。
 
-`/etc/oidc-agent/config` の既存の `oidc-agent` セクションに、以下の3項目を反映する。**この例でファイル全体を置き換えず、他の設定・セクションを残す。** ファイルがない場合は [詳細版の設定手順](ADMIN_GUIDE.md#33-etcoidc-agentconfig) を確認する。
+`jldg-auth.conf` は信頼する管理者用の Bash 設定で、`JLDG_GEN_OPTIONS` 配列が初回登録・再認証の共通オプションを指定する。GUI 自動起動を避けるための `--no-url-call`、localhost コールバック用の `--no-scheme --flow=code`、CLI パスワード入力等の既定値を確認する。JSON のパスは `JLDG_CLIENT_CONFIG` で指定する。
+
+`/etc/oidc-agent/config` の既存の `oidc-agent` セクションに次を反映する。他の設定・セクションは残す。
 
 ```json
 {
@@ -59,75 +60,70 @@ sudoedit /etc/oidc-agent/config
 }
 ```
 
-次の点も確認する。
+利用者側設定・service オプションによる上書きがないことも確認する。issuer 設定は `issuer` を一致させ、`pw-store` を `true` にする。設定変更後は、同じ利用者の他端末への影響を確認したうえで、その利用者が `oidc-agent-service stop` 等で既存 agent を停止する。
 
-- `/etc/oidc-agent/issuer.config.d/jldg` の `issuer` がクライアント JSON の `issuer_url` と一致し、`pw-store` が `true` である。
-- ユーザー側の設定や既存の issuer 設定・起動オプションが上記設定を上書きしていない。
-- Gfarm の検証用設定に `sasl_password` がなく、検証用利用者の環境に `GFARM_SASL_PASSWORD` が設定されていない。
+## 4. 環境と agent を準備する（一般利用者）
 
-## 4. 初回登録する（一般利用者）
-
-`jldg` が未登録の検証用一般利用者で実行ホストへログインし（別 PC からは SSH を使う）、Bash で実行する。**ここからは `sudo` を付けない。** 既存 agent がある場合は、設定反映のため先に `oidc-agent-service stop` を実行する。これは環境変数がないログイン直後でも service の agent を停止できる。service の管理先を変えないよう、起動時と同じ `TMPDIR` を使う。同じ利用者の他端末にも停止が影響するため、検証用利用者で行う。
+ここからは sudo を付けず、検証用一般利用者の Bash で実行する。
 
 ```bash
-unset JWT_USER_PATH
-eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
-printf 'start status=%s\n' "$?"
+source /usr/local/share/jldg/jldg-env.sh
+eval "$(oidc-agent-service use)" >/dev/null
+oidc-agent --status
 ```
 
-暗号化パスワードを設定する。認証 URL が表示されたら、元の端末を待たせたまま、**JLDG の証明書がインストールされたブラウザ**で認証する。
+**確認：** `JWT_USER_PATH` は `!jldg-token`、PATH から `jldg-auth` と `jldg-token` が見つかる。agent のバージョンは5系で、Autoload・Auto Re-authenticate は false、Webserver は true、Confirm は false である。auto-gen は設定ファイルでも確認する。
 
-- **実行ホストと同じマシンのブラウザを使う場合：** 認証 URL を直接開く。SSH 転送や SOCKS proxy の設定は不要である。
-- **別 PC のブラウザを使う場合：** PC の別端末で、表示されたオプションを使って SSH 接続を開始する。例えばコールバック用ポートが `4243` の場合：
+環境設定は agent を起動・再接続しない。`use` は利用者による標準 agent 操作である。tcsh の手順は [詳細版](ADMIN_GUIDE.md#57-tcsh) を参照する。
+
+## 5. 初回登録・保存済みアカウントの読み込み
+
+未登録の検証用利用者なら次を実行する。
+
+```bash
+jldg-auth
+printf 'register status=%s\n' "$?"
+```
+
+`jldg-auth` は保存済みの jldg がなければ初回登録、あれば再認証を行う。単に未読み込みの場合は、この節の末尾の oidc-add を使う。
+
+暗号化パスワードを設定し、**JLDG の証明書がインストールされたブラウザ**で認証する。
+
+- 同じマシンのブラウザなら認証 URL を直接開く。
+- 別 PC なら、その PC の別端末で表示されたポートを使って転送を準備する。例：
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 4243:localhost:4243 -D 1080 YOUR_SSH_HOST_ALIAS
 ```
 
-別 PC の場合、接続先を実行ホストの実際の SSH 接続先に置き換え、`-L` のポートは表示に合わせる。普段必要な踏み台・鍵等のオプションも使う。ブラウザの SOCKS5 proxy を `localhost:1080` に設定する。SSH 接続を維持したまま認証 URL を開く。元の端末の処理が完了したら、ブラウザの proxy 設定を元に戻し、転送端末を Ctrl-C で終了する。
+ブラウザの SOCKS5 proxy を localhost:1080 に設定して認証 URL を開く。Enter 待ちになっても認証完了まで押さない。元の端末で処理が完了したら proxy を元に戻し、転送を Ctrl-C で終了する。
 
-`Please press Enter to try it again.` が出ても、SSH やブラウザの準備中は Enter を押さず待たせる。ブラウザ認証を完了してから元の端末で Enter を押す。生成開始・受付の3行は helper が非表示にする。登録完了は次の成功表示と終了状態で確認する。
+**確認：** `JLDG account registration completed.` と `register status=0` が表示される。これは oidc-gen の完了であり、トークン確認は次節で行う。
 
-**確認：元の端末に `JLDG authentication is ready for Gfarm.` と `start status=0` が表示される。**
-
-## 5. 接続を確認する（同じ一般利用者・同じ Bash）
+保存済みアカウントを新しい agent に読み込む場合は、登録を繰り返さず次を使う。
 
 ```bash
-printenv JWT_USER_PATH
-/usr/local/share/jldg/jldg-agent.sh status
-oidc-token --force-new jldg >/dev/null
-printf 'token status=%s\n' "$?"
+oidc-add --pw-prompt=cli --pw-store jldg
 ```
 
-**確認：** `JWT_USER_PATH` は `!oidc-token --time=60 jldg`、`status` は `Agent: reachable` と `JLDG account: loaded` を表示する。agent の `Autoload` と `Auto Re-authenticate` は `false`、`Webserver` は `true`、`token status=0` である。`status` 自体はトークンを取得・更新しない。
-
-下記の2つのパスを実際の検証用パスに置き換えて実行する。
+## 6. トークンと Gfarm を確認する
 
 ```bash
+oidc-add --loaded
+jldg-token >/dev/null
+printf 'token status=%s\n' "$?"
 gfls 'gfarm:///REPLACE_WITH_TEST_DIRECTORY'
 printf 'gfls status=%s\n' "$?"
 gfexport 'gfarm:///REPLACE_WITH_TEST_FILE' >/dev/null
 printf 'gfexport status=%s\n' "$?"
 ```
 
-**確認：両方の status が 0 である。** 検証用設定で他の認証方式への切り替えを無効にするか、サーバーログ等で **XOAUTH2 を使ったことも確認する**。
+**確認：** jldg が読み込み済みで各 status が0となる。パスは実際の検証用パスへ置き換える。他方式へのフォールバックを無効にするかログで XOAUTH2 の使用を確認し、`GFARM_SASL_PASSWORD` や `sasl_password` 等の別設定が使われていないことも確かめる。
 
-## 6. 停止・再読み込みを確認する（同じ Bash）
+## 7. 再ログイン・失効・失敗・停止を確認する
 
-```bash
-eval "$(/usr/local/share/jldg/jldg-agent.sh stop)"
-printf 'stop status=%s\n' "$?"
-printenv JWT_USER_PATH OIDC_SOCK OIDCD_PID OIDCD_PID_FILE
-```
-
-**確認：`stop status=0` で、`printenv` は何も表示しない。**
-
-```bash
-unset JWT_USER_PATH
-eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
-printf 'reload status=%s\n' "$?"
-```
-
-暗号化パスワードを入力する。**確認：正常な保存済みアカウントではブラウザ認証なしで `reload status=0` となる。** 続けて手順5を再実行し、トークン取得と Gfarm 接続が成功すれば基本確認は完了。
-
-tcsh 利用者へ配布する場合は、追加で [README の tcsh 手順](README.md#開始と停止) による開始・停止と、tcsh からのトークン取得・Gfarm 接続を確認する。失効時の再認証などの追加確認や、途中で失敗した場合の調査は [詳細版](ADMIN_GUIDE.md) を参照する。
+- 再ログイン後は環境設定を再び読み込み、利用者の標準連携で再接続する。必要なら oidc-add で読み込む。Bash の対話ログイン時の use 自動実行例は [詳細版](ADMIN_GUIDE.md#56-再ログインと自動接続) を参照する。
+- 検証用 refresh token の失効後、更新が必要になった状態で jldg-token が失敗し、標準エラーに復旧案内だけを追加することを確認する。有効なキャッシュが残っている場合、取得は成功し得る。
+- 再認証が必要なら `jldg-auth` を利用者が明示実行し、トークン・Gfarm を再確認する。ラッパーは再認証を開始しない。
+- 通信障害ではネットワークを復旧して再試行する。パスワード入力中の Ctrl-C では端末設定が戻り、agent や環境設定は残ることを確認する。
+- 停止は利用者の通常の方法（service 管理なら `oidc-agent-service stop`）で行う。停止後も `JWT_USER_PATH` は残り、トークン取得は失敗して復旧案内を表示する。停止はトークンの取り消しではない。

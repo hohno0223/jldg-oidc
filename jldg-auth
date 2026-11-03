@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Run directly from Bash or tcsh; this command never emits shell commands.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    printf '%s\n' 'Run jldg-auth directly; do not source it.' >&2
+    return 2
+fi
+
+terminal_state=''
+restore_terminal() {
+    local rc=$?
+    if [[ -n $terminal_state ]]; then
+        stty "$terminal_state" || printf '%s\n' 'Could not restore terminal settings; run stty echo.' >&2
+    fi
+    return "$rc"
+}
+trap restore_terminal EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+umask 077
+
+show_forward_options() {
+    local line port
+    # Only the localhost redirect URIs configured for JLDG are supported.
+    local pattern='[?&]redirect_uri=http%3[Aa]%2[Ff]%2[Ff]localhost%3[Aa]([0-9]+)(&|[[:space:]]|$)'
+    while IFS= read -r line; do
+        [[ $line =~ $pattern ]] || continue
+        port=${BASH_REMATCH[1]}
+        printf '\nBrowser authentication:
+Use a browser with the JLDG certificate installed in either case.
+
+Browser on the same machine as oidc-agent:
+  Open the authorization URL directly. No SSH forwarding is needed.
+
+Browser on a different PC:
+  In another terminal on that PC, add these options before the destination
+  in your usual SSH command to the machine running oidc-agent:
+
+    -N -o ExitOnForwardFailure=yes -L %s:localhost:%s -D 1080
+
+  Set the browser SOCKS5 proxy to localhost:1080 to reach the OP through SSH.
+  Keep SSH connected, then open the authorization URL in that browser.
+  When authentication and the original terminal command finish, restore
+  the previous browser proxy settings and stop forwarding with Ctrl-C.
+
+If polling stops and asks for Enter, complete browser authentication first,
+then press Enter in this terminal. Keep SSH connected while it waits.
+' "$port" "$port"
+    done >&2
+}
+
+filter_gen_stdout() {
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        case $line in
+            'No account exists with this short name. Creating new configuration ...'|\
+            'Generating account configuration ...'|accepted) ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done
+}
+
+filter_gen_output() {
+    local char pending='' passthrough=0 suppress=0
+    local header='Please try state lookup again by using:'
+    local command='oidc-gen --state='
+    # Forward ordinary text as soon as it differs from the two hidden lines.
+    # In particular, do not wait for a newline before displaying a prompt.
+    while IFS= read -r -N 1 char; do
+        if [[ $char == $'\n' ]]; then
+            if (( !suppress )) && [[ $pending != "$header" ]]; then
+                printf '%s\n' "$pending"
+            fi
+            pending='' passthrough=0 suppress=0
+        elif ((suppress)); then
+            continue
+        elif ((passthrough)); then
+            printf '%s' "$char"
+        else
+            pending+=$char
+            if [[ $pending == "$command" ]]; then
+                suppress=1
+                pending=''
+            elif [[ $header != "$pending"* && $command != "$pending"* ]]; then
+                printf '%s' "$pending"
+                pending='' passthrough=1
+            fi
+        fi
+    done
+    if (( !suppress )) && [[ $pending != "$header" ]]; then
+        printf '%s' "$pending"
+    fi
+    return 0
+}
+
+run_gen() {
+    (
+        set -o pipefail
+        # Filter stdout first, then handle the merged stream in one filter
+        # so concurrent stdout writes cannot split stderr text into characters.
+        OIDC_AGENT_NOCOLOR=1 oidc-gen "${JLDG_GEN_OPTIONS[@]}" "$@" \
+            2>&1 > >(filter_gen_stdout) |
+            filter_gen_output | tee >(cat >&2) | show_forward_options
+    )
+}
+
+main() {
+    local cmd accounts account registered=0
+    local auth_config=${JLDG_AUTH_CONFIG:-/etc/oidc-agent/jldg-auth.conf}
+    if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
+        printf '%s\n' 'Usage: jldg-auth' \
+            'Register jldg if no saved account exists; otherwise reauthenticate it.'
+        return 0
+    fi
+    if [[ $# != 0 ]]; then
+        printf '%s\n' 'Usage: jldg-auth' >&2
+        return 2
+    fi
+    for cmd in oidc-agent oidc-gen tee cat stty; do
+        command -v "$cmd" >/dev/null || {
+            printf 'Required command not found: %s\n' "$cmd" >&2
+            return 1
+        }
+    done
+    [[ -r $auth_config ]] || {
+        printf 'Cannot read administrator configuration: %s\n' "$auth_config" >&2
+        return 1
+    }
+    # Trusted, administrator-managed Bash settings, including an options array.
+    source "$auth_config" || return 1
+    if ! oidc-agent --status >/dev/null 2>&1; then
+        printf '%s\n' 'Cannot connect to oidc-agent. Start or reconnect to your agent, then retry.' >&2
+        return 1
+    fi
+    # Saved configurations determine registration, independently of loaded accounts.
+    if ! accounts=$(oidc-gen --accounts); then
+        printf '%s\n' 'Could not list saved accounts; authentication was not started.' >&2
+        return 1
+    fi
+    while IFS= read -r account; do
+        if [[ $account == jldg ]]; then
+            registered=1
+            break
+        fi
+    done <<<"$accounts"
+    if [[ -t 0 ]]; then
+        terminal_state=$(stty -g) || return 1
+    fi
+    if (( !registered )); then
+        [[ -r $JLDG_CLIENT_CONFIG ]] || {
+            printf 'Cannot read client configuration: %s\n' "$JLDG_CLIENT_CONFIG" >&2
+            return 1
+        }
+        run_gen --file="$JLDG_CLIENT_CONFIG" jldg || return 1
+        printf '%s\n' 'JLDG account registration completed.' >&2
+    else
+        run_gen --reauthenticate jldg || return 1
+        printf '%s\n' 'JLDG reauthentication completed.' >&2
+    fi
+}
+
+main "$@"
+exit $?
