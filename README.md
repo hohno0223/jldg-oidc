@@ -11,6 +11,7 @@ JLDG の OIDC 認証を準備し、Gfarm が必要時にアクセストークン
 Bash:
 
 ```bash
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 eval "$(/usr/local/share/jldg/jldg-agent.sh stop)"
 ```
@@ -18,11 +19,14 @@ eval "$(/usr/local/share/jldg/jldg-agent.sh stop)"
 tcsh:
 
 ```csh
+unsetenv JWT_USER_PATH
 eval `/usr/local/share/jldg/jldg-agent.csh start`
 eval `/usr/local/share/jldg/jldg-agent.csh stop`
 ```
 
 通常は `start` だけを実行し、利用を終えて agent を停止するときに `stop` を実行する。3つのスクリプトはすべて Bash で動き、`.csh` の入口は tcsh 用の環境設定を出力する。ログインシェルを Bash に変更する必要はない。
+
+開始前の `unset` / `unsetenv` は、中断しても以前の `JWT_USER_PATH` が残らないよう、呼び出し元のシェルで先に解除する操作である。
 
 `start` と `stop` の出力を `eval` することで、現在のシェルと以後の子プロセスに環境変数を反映する。これらを `eval` なしで実行したり `source` で読み込んだりしても、上記の操作の代わりにならない。
 
@@ -43,7 +47,7 @@ eval `/usr/local/share/jldg/jldg-agent.csh stop`
 
 `--time=60` は残存有効時間を60秒以上要求する指定であり、トークンの寿命を60秒にするものではない。
 
-`stop` は接続中の agent を停止し、現在のシェルの環境変数を解除する。`OIDC_SOCK` が未設定・空の場合は `Not connected to a JLDG agent.`、接続先が応答しない場合は `JLDG agent is not running or not connected.` と表示し、停止操作は行わず環境変数だけ解除する。未接続のシェルから稼働中の agent を停止したい場合は、先に `start` で再接続する。`JLDG agent stopped.` は接続確認と停止処理が成功した場合だけ表示する。暗号化アカウントファイルは残る。発行済みトークンを取り消す操作ではない。
+`stop` は接続中の agent を停止し、現在のシェルの環境変数を解除する。`OIDC_SOCK` が未設定・空の場合は `Not connected to a JLDG agent.`、接続先が応答しない場合は `JLDG agent is not running or not connected.` と表示し、停止操作は行わず環境変数だけ解除する。未接続のシェルから稼働中の agent を停止したい場合は、先に `start` で再接続する。`JLDG agent stopped.` は接続先のソケットと PID ファイルが service の管理先に一致し、停止処理後に接続できなくなった場合だけ表示する。一致しない場合や停止後も応答する場合は失敗として扱い、接続用変数を残す。暗号化アカウントファイルは残る。発行済みトークンを取り消す操作ではない。
 
 ## ログインし直した後
 
@@ -104,11 +108,11 @@ ssh -N -o ExitOnForwardFailure=yes -L 4243:localhost:4243 -D 1080 YOUR_SSH_HOST_
 - パスワード入力中の中断に備え、`start` は開始時の端末設定を保存し、終了時に復元する。旧版の中断後などで入力文字が見えない場合は、`stty echo` と入力して Enter を押す。入力文字が見えなくても実行できる。
 
 - 通信障害や暗号化パスワードの誤りなどでは、ブラウザ再認証を始めずに失敗する。原因を解消して `start` を再実行する。
-- 開始失敗・中断時は `JWT_USER_PATH` を解除して非0の終了状態を返す。認証失敗・ポーリング失敗・Ctrl-C などのいずれでも、今回の処理で新規起動した agent を停止する。既に起動していた共有 agent を再利用した場合は停止しない。停止に失敗した場合は手動停止の案内を表示する。
+- 通常の開始失敗時は、`eval` により `JWT_USER_PATH` を解除して非0の終了状態を返す。Ctrl-C 等で親シェルが `eval` 自体を中断すると、解除コマンドが適用されない場合があるため、開始前に上記の `unset` / `unsetenv` を実行する。省略して中断した場合は、Bash で `unset JWT_USER_PATH`、tcsh で `unsetenv JWT_USER_PATH` を実行する。認証失敗・ポーリング失敗・Ctrl-C などのいずれでも、今回の処理で新規起動を確認できた agent を停止する。既に起動していた共有 agent を再利用した場合は停止しない。停止に失敗した場合は手動停止の案内を表示する。
 - 停止失敗時も `JWT_USER_PATH` を解除して失敗を返すが、既存の接続用環境変数は残す。引数の誤りでは環境を変更しない。
 - 未読み込みのアカウントや、失効した refresh token は、`start` の再実行で読み込み・再認証する。Gfarm の実行中に agent が自動で登録・読み込み・再認証を始める設定にはしていない。
 - 同じ利用者・同じホストの agent は複数端末で共有する。別端末からの `stop` も共有 agent 全体に影響する。他端末の環境変数は解除されないので、その端末で再び `start` を実行する。
-- 同じ利用者による同時初回登録・同時新規起動は保証しない。ホスト再起動後は `start` を再実行する。
+- 起動コマンドの完了前など、新規起動を確認できない段階での中断や SIGKILL による終了では、自動停止を保証しない。同じ利用者による同時初回登録・同時新規起動は保証しない。ホスト再起動後は `start` を再実行する。
 
 ## ファイル構成
 
@@ -121,4 +125,3 @@ ssh -N -o ExitOnForwardFailure=yes -L 4243:localhost:4243 -D 1080 YOUR_SSH_HOST_
 | `issuer.config.d/jldg` | JLDG 用の暗号化パスワード保持設定 |
 | [ADMIN_QUICKSTART.md](ADMIN_QUICKSTART.md) | 管理者向けの導入・基本動作確認の簡易手順 |
 | [ADMIN_GUIDE.md](ADMIN_GUIDE.md) | 管理者向けの導入、動作確認、障害切り分け、更新時の注意 |
-| [HANDOFF.md](HANDOFF.md) | 別の AI 向けの変更経緯、決定事項、検証結果、未対応事項 |

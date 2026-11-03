@@ -97,8 +97,46 @@ if [[ $1 == status ]]; then
     exit $?
 fi
 
+# Standard service paths for the supported Linux oidc-agent 5 packages.
+# Check these against the returned connection before stopping a service agent.
+service_dir=${TMPDIR:-/tmp}/oidc-agent-service-${UID}
+service_pid_file=$service_dir/oidc-agent.pid
+service_socket=$service_dir/oidc-agent.sock
+
+read_agent_pid() {
+    local pid=''
+    [[ -r $1 ]] && { IFS= read -r pid < "$1" || [[ -n $pid ]]; } &&
+        [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "$pid"
+}
+
+stop_service_agent() {
+    local pid
+    # --status uses OIDC_SOCK, whereas service stop uses its own cache.
+    # Refuse to stop a different agent, including after TMPDIR changes.
+    if [[ -z ${OIDCD_PID_FILE:-} || ! $OIDCD_PID_FILE -ef $service_pid_file ||
+          ! ${OIDC_SOCK:-} -ef $service_socket ]]; then
+        printf '%s\n' 'Connection does not match the service-managed agent; not stopped.' >&2
+        return 1
+    fi
+    pid=$(read_agent_pid "$service_pid_file") || {
+        printf '%s\n' 'Cannot determine the service agent PID; not stopped.' >&2
+        return 1
+    }
+    if [[ $# != 0 && $pid != "$1" ]]; then
+        printf '%s\n' 'The service agent has changed; not stopped.' >&2
+        return 1
+    fi
+    oidc-agent-service stop >/dev/null || return 1
+    if oidc-agent --status >/dev/null 2>&1; then
+        printf '%s\n' 'The agent is still reachable after the stop request.' >&2
+        return 1
+    fi
+}
+
 terminal_state=''
 started_agent=0
+started_pid=''
 on_exit() {
     local rc=$?
     # oidc-gen/oidc-add disable terminal echo while asking for passwords.
@@ -107,13 +145,25 @@ on_exit() {
         stty "$terminal_state" || printf '%s\n' 'Could not restore terminal settings; run stty echo.' >&2
     fi
     if ((rc != 0 && started_agent)); then
-        if oidc-agent-service stop >/dev/null; then
+        if [[ -n $started_pid ]] && stop_service_agent "$started_pid"; then
             printf '%s\n' 'Start failed; stopped the agent started by this command.' >&2
         else
             printf '%s\n' 'Could not stop the newly started agent; run oidc-agent-service stop.' >&2
         fi
     fi
     if ((rc != 0)); then
+        case $rc in
+            129|130|143)
+                # Interactive shells may abort eval before applying stdout.
+                if [[ -n ${JWT_USER_PATH:-} ]]; then
+                    if [[ $shell_format == bash ]]; then
+                        printf '%s\n' 'Interrupted; run unset JWT_USER_PATH in this shell before retrying.' >&2
+                    else
+                        printf '%s\n' 'Interrupted; run unsetenv JWT_USER_PATH in this shell before retrying.' >&2
+                    fi
+                fi
+                ;;
+        esac
         emit_unset JWT_USER_PATH
         # Preserve failure through eval without exiting the calling shell.
         printf '/bin/false;\n'
@@ -212,7 +262,7 @@ run_gen() {
 }
 
 main() {
-    local action=$1 agent_env accounts token_error cmd value
+    local action=$1 agent_env accounts token_error cmd value previous_pid
     local reauth_required=0
     local client_config=${JLDG_CLIENT_CONFIG:-/etc/oidc-agent/jldg-client.json}
     local -a gen_options=(
@@ -233,7 +283,7 @@ main() {
             if ! oidc-agent --status >/dev/null 2>&1; then
                 printf '%s\n' 'JLDG agent is not running or not connected.' >&2
             else
-                oidc-agent-service stop >/dev/null || {
+                stop_service_agent || {
                     printf '%s\n' 'Could not stop the JLDG agent.' >&2
                     return 1
                 }
@@ -247,7 +297,7 @@ main() {
         return 0
     fi
 
-    for cmd in oidc-agent-service oidc-gen oidc-add oidc-token grep tee cat stty; do
+    for cmd in oidc-agent-service oidc-agent oidc-gen oidc-add oidc-token grep tee cat stty; do
         command -v "$cmd" >/dev/null || {
             printf 'Required command not found: %s\n' "$cmd" >&2
             return 1
@@ -263,8 +313,9 @@ main() {
         terminal_state=$(stty -g) || return 1
     fi
 
-    # start succeeds only for a new service agent; otherwise reuse it.
-    # Track ownership so failed startup does not stop an existing shared agent.
+    # use can start an agent too. Remember the previous service PID so that
+    # a new agent created by either branch is cleaned up on failure.
+    previous_pid=$(read_agent_pid "$service_pid_file") || previous_pid=''
     if agent_env=$(oidc-agent-service start 2>/dev/null); then
         started_agent=1
     else
@@ -275,8 +326,7 @@ main() {
     # On reuse, oidc-agent-service can emit an empty or inherited OIDCD_PID.
     # Its PID file is authoritative and remains available after logout.
     if [[ -n ${OIDCD_PID_FILE:-} ]]; then
-        if ! { [[ -r $OIDCD_PID_FILE ]] &&
-            { IFS= read -r OIDCD_PID < "$OIDCD_PID_FILE" || [[ -n $OIDCD_PID ]]; }; }; then
+        if ! OIDCD_PID=$(read_agent_pid "$OIDCD_PID_FILE"); then
             printf 'Cannot read agent PID from: %s\n' "$OIDCD_PID_FILE" >&2
             return 1
         fi
@@ -285,6 +335,18 @@ main() {
         printf '%s\n' 'oidc-agent-service did not provide agent connection variables.' >&2
         return 1
     }
+
+    if [[ $OIDCD_PID != "$previous_pid" ]]; then
+        started_agent=1
+    fi
+    if ((started_agent)); then
+        started_pid=$OIDCD_PID
+    fi
+    if [[ -z ${OIDCD_PID_FILE:-} || ! $OIDCD_PID_FILE -ef $service_pid_file ||
+          ! $OIDC_SOCK -ef $service_socket ]]; then
+        printf '%s\n' 'Agent connection does not match the standard oidc-agent-service paths.' >&2
+        return 1
+    fi
 
     accounts=$(oidc-gen --accounts) || return 1
     if ! grep -Fxq -- jldg <<<"$accounts"; then

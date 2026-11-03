@@ -29,7 +29,11 @@ sudo install -o root -g root -m 0755 jldg-agent.sh jldg-agent.csh jldg-agent-cor
 sudo install -d -o root -g root -m 0755 /etc/oidc-agent/issuer.config.d
 sudo install -o root -g root -m 0644 jldg-client.json /etc/oidc-agent/jldg-client.json
 sudo install -o root -g root -m 0644 issuer.config.d/jldg /etc/oidc-agent/issuer.config.d/jldg
-bash -n /usr/local/share/jldg/jldg-agent.sh /usr/local/share/jldg/jldg-agent.csh /usr/local/share/jldg/jldg-agent-core.sh
+(
+    for jldg_script in jldg-agent.sh jldg-agent.csh jldg-agent-core.sh; do
+        bash -n "/usr/local/share/jldg/$jldg_script" || exit
+    done
+)
 ```
 
 **確認：エラーが出ず、配置先は root 所有で一般利用者に書き込み権限がない。**
@@ -63,9 +67,10 @@ sudoedit /etc/oidc-agent/config
 
 ## 4. 初回登録する（一般利用者）
 
-`jldg` が未登録の検証用一般利用者で実行ホストへログインし（別 PC からは SSH を使う）、Bash で実行する。**ここからは `sudo` を付けない。** 既存 agent がある場合は、設定反映のため先に README の `stop` を実行する。同じ利用者の他端末にも停止が影響するため、検証用利用者で行う。
+`jldg` が未登録の検証用一般利用者で実行ホストへログインし（別 PC からは SSH を使う）、Bash で実行する。**ここからは `sudo` を付けない。** 既存 agent がある場合は、設定反映のため先に `oidc-agent-service stop` を実行する。これは環境変数がないログイン直後でも service の agent を停止できる。service の管理先を変えないよう、起動時と同じ `TMPDIR` を使う。同じ利用者の他端末にも停止が影響するため、検証用利用者で行う。
 
 ```bash
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 printf 'start status=%s\n' "$?"
 ```
@@ -118,6 +123,7 @@ printenv JWT_USER_PATH OIDC_SOCK OIDCD_PID OIDCD_PID_FILE
 **確認：`stop status=0` で、`printenv` は何も表示しない。**
 
 ```bash
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 printf 'reload status=%s\n' "$?"
 ```

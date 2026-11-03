@@ -21,7 +21,7 @@
 
 - Linux、Bash、oidc-agent 5 系。tcsh 利用者にも案内する場合は tcsh。
 - `oidc-agent-service`、`oidc-agent`、`oidc-gen`、`oidc-add`、`oidc-token` と、それらのパッケージ依存関係。
-- スクリプトが使う `grep`、`tee`、`cat`、`dirname` 等の標準コマンド。本書の静的確認には Python 3 も使用する。
+- スクリプトが使う `grep`、`tee`、`cat`、`dirname`、`stty` 等の標準コマンド。本書の静的確認には Python 3 も使用する。
 - `JWT_USER_PATH` の `!コマンド` 形式に対応した Gfarm クライアントと XOAUTH2 メカニズム。
 - 実行ホストから OP への HTTPS 接続と、JLDG の証明書がインストールされたブラウザ。
 - 別 PC のブラウザを使う場合は、PC から実行ホストへの SSH ローカルポート転送と動的転送（SOCKS5 proxy）。ブラウザから OP へはこの proxy を通して接続する。同じマシンのブラウザを使う場合は、この SSH 転送は不要。
@@ -36,7 +36,7 @@ oidc-agent は、使用する OS に対応したパッケージと依存関係�
 実行ホストで以下を確認する。最終的には検証用利用者のログイン環境でも同じコマンドが見つかる必要がある。
 
 ```bash
-command -v bash oidc-agent-service oidc-agent oidc-gen oidc-add oidc-token grep tee cat dirname
+command -v bash stty oidc-agent-service oidc-agent oidc-gen oidc-add oidc-token grep tee cat dirname
 oidc-agent --version
 oidc-gen --version
 oidc-add --version
@@ -86,7 +86,7 @@ sudo install -o root -g root -m 0644 jldg-client.json /etc/oidc-agent/jldg-clien
 sudo install -o root -g root -m 0644 issuer.config.d/jldg /etc/oidc-agent/issuer.config.d/jldg
 ```
 
-3スクリプトは必ず同じディレクトリに置く。配置先ファイルと親ディレクトリを一般利用者が書き換えられないことを確認する。クライアント JSON は public client の情報であり、利用者のトークンやパスワードを記入しない。
+3スクリプトは必ず同じディレクトリに置く。helper の管理対象は Linux 版 oidc-agent 5 系の標準 service 管理先（`${TMPDIR:-/tmp}/oidc-agent-service-${UID}`）とする。service が返したソケットと PID ファイルをこの管理先と照合する。service スクリプト自体を改変して管理先を変更した構成は対象外とする。配置先ファイルと親ディレクトリを一般利用者が書き換えられないことを確認する。クライアント JSON は public client の情報であり、利用者のトークンやパスワードを記入しない。
 
 ### 3.2 クライアント JSON と issuer 設定
 
@@ -153,7 +153,7 @@ sudoedit /etc/oidc-agent/config
 
 利用者の oidc-agent ディレクトリ内の `config` はシステム設定を上書きできる。利用者が `OIDC_USER_CONFIG` で別ファイルを指定している場合も確認する。また、システム側・利用者側の `oidc-agent-service.options` に既存の起動オプションがないか確認する。これらの設定は JLDG 以外のアカウントにも影響する。[設定の優先順位](https://indigo-dc.github.io/oidc-agent/configuration/config/)・[service の設定](https://indigo-dc.github.io/oidc-agent/usage/oidc-agent-service/)
 
-設定を変えても、起動済み agent の動作はそのままである。利用者として `stop` と `start` を順に実行して反映する。スクリプトは起動済み agent の設定を検査しない。
+設定を変えても、起動済み agent の動作はそのままである。利用者として `oidc-agent-service stop` を実行してから、README の `start` 手順を実行して反映する。ログイン直後など接続用環境変数がない場合、helper の `stop` は停止しないため、この設定反映操作には service の停止を使う。起動時と同じ `TMPDIR` を使い、他端末への影響を確認する。スクリプトは起動済み agent の設定を検査しない。
 
 ### 3.4 Gfarm の準備
 
@@ -169,7 +169,11 @@ Gfarm 管理者は TLS、XOAUTH2、信頼する issuer、要求する audience�
 ls -ld /usr/local/share/jldg /etc/oidc-agent /etc/oidc-agent/issuer.config.d
 ls -l /usr/local/share/jldg/jldg-agent.sh /usr/local/share/jldg/jldg-agent.csh /usr/local/share/jldg/jldg-agent-core.sh
 ls -l /etc/oidc-agent/config /etc/oidc-agent/jldg-client.json /etc/oidc-agent/issuer.config.d/jldg
-bash -n /usr/local/share/jldg/jldg-agent.sh /usr/local/share/jldg/jldg-agent.csh /usr/local/share/jldg/jldg-agent-core.sh
+(
+    for jldg_script in jldg-agent.sh jldg-agent.csh jldg-agent-core.sh; do
+        bash -n "/usr/local/share/jldg/$jldg_script" || exit
+    done
+)
 python3 -m json.tool /etc/oidc-agent/jldg-client.json >/dev/null
 python3 -m json.tool /etc/oidc-agent/issuer.config.d/jldg >/dev/null
 ```
@@ -214,6 +218,7 @@ PY
 
 ```bash
 oidc-gen --accounts
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 printf 'start status=%s\n' "$?"
 ```
@@ -233,6 +238,8 @@ ssh -N -o ExitOnForwardFailure=yes -L 4243:localhost:4243 -D 1080 YOUR_SSH_HOST_
 その PC のブラウザで SOCKS5 proxy のホストを `localhost`、ポートを `1080` に設定する。SSH 接続を維持したまま認証 URL を開く。認証完了後、元の端末の処理が完了したらブラウザの proxy 設定を元に戻し、転送端末を Ctrl-C で終了する。[転送手順の詳細](README.md#ブラウザ認証時の転送)
 
 確認した oidc-agent 5.3.6 は約40秒（20回×2秒）の自動照会後、`Please press Enter to try it again.` を表示して入力を待つ。照会回数・間隔はプログラム内の定数であり、通常の設定・オプションでは変更できない。この表示ではまだ終了していない。ブラウザ認証を完了してから元の端末で Enter を押す。認証未完了で Enter を押す、または標準入力が EOF になると、最後の1回の照会に失敗して終了する。
+
+開始例では、Ctrl-C 等で `eval` 自体が中断されても以前の値が残らないよう、先に親シェルで `JWT_USER_PATH` を解除する。helper の出力による変数解除は、親シェルが `eval` を最後まで実行した場合だけ適用される。中断後に値が残っている場合は Bash で `unset JWT_USER_PATH`、tcsh で `unsetenv JWT_USER_PATH` を実行する。
 
 helper は標準入力が端末でない場合、利用可能な制御端末 `/dev/tty` に接続し直す。これにより `eval`・バッククォート経由でも Enter 待ちを維持する。端末のないバッチ実行でブラウザ認証を行うことは想定しない。OP 自身の認証セッションの期限は別であり、失効した場合はやり直す。
 
@@ -282,6 +289,7 @@ printf 'gfexport status=%s\n' "$?"
 ### 5.4 繰り返し開始と refresh token の利用
 
 ```bash
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 printf 'repeat start status=%s\n' "$?"
 oidc-token --force-new jldg >/dev/null
@@ -310,6 +318,7 @@ oidc-gen --accounts
 期待結果：停止が終了状態 0、4変数は解除され、保存済みアカウントには `jldg` が残る。停止は発行済みトークンの取り消しではないので、Gfarm 接続の成否だけで停止を判定しない。
 
 ```bash
+unset JWT_USER_PATH
 eval "$(/usr/local/share/jldg/jldg-agent.sh start)"
 printf 'reload status=%s\n' "$?"
 oidc-token --force-new jldg >/dev/null
@@ -332,6 +341,7 @@ printf 'refresh after reload status=%s\n' "$?"
 tcsh 利用者へ配布する場合は、tcsh にログインして次を確認する。Bash 用の入口を `source` して使わない。
 
 ```csh
+unsetenv JWT_USER_PATH
 eval `/usr/local/share/jldg/jldg-agent.csh start`
 echo "start status=$status"
 printenv JWT_USER_PATH
