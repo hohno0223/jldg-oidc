@@ -160,7 +160,7 @@ sudoedit /etc/oidc-agent/config
 
 利用者の oidc-agent ディレクトリ内の `config` はシステム設定を上書きできる。利用者が `OIDC_USER_CONFIG` で別ファイルを指定している場合も確認する。また、システム側・利用者側の `oidc-agent-service.options` に既存の起動オプションがないか確認する。これらの設定は JLDG 以外のアカウントにも影響する。[設定の優先順位](https://indigo-dc.github.io/oidc-agent/configuration/config/)・[service の設定](https://indigo-dc.github.io/oidc-agent/usage/oidc-agent-service/)
 
-設定を変えても、起動済み agent の動作はそのままである。利用者として `oidc-keychain --kill >/dev/null` を実行してから、5節の起動・再接続手順を実行して反映する。helper は起動・再接続・停止を一切行わない。起動時と同じ `TMPDIR` を使い、他端末への影響を確認する。スクリプトは起動済み agent の設定を検査しない。
+設定を変えても、起動済み agent の動作はそのままである。利用者として5.5または5.7の停止手順を実行してから、5節の起動・再接続手順を実行して反映する。helper は起動・再接続・停止を一切行わない。起動時と同じ `TMPDIR` を使い、他端末への影響を確認する。スクリプトは起動済み agent の設定を検査しない。
 
 ### 3.3.1 管理者指定の oidc-gen オプション
 
@@ -296,16 +296,25 @@ CLI 入力とパスワード保持は3節の管理者設定による。`--pw-pro
 
 ### 5.5 停止と再読み込み
 
-同じ利用者の共有 agent を使う他端末・他アカウントへの影響を確認してから停止する。
+同じ利用者の共有 agent を使う他端末・他アカウントへの影響を確認してから停止する。Bash の通常の停止操作は `eval "$(oidc-keychain --kill)"` であり、agent を停止し、出力された削除コマンドで現在のシェルの接続用変数も解除する。
+
+検証では、停止処理自体の終了状態も確認するため、出力を変数に受け取り、成功時だけ評価する。単に eval の終了状態を見ると、停止処理の失敗を見落とす場合がある。
 
 ```bash
-oidc-keychain --kill >/dev/null
+jldg_stop_commands=$(oidc-keychain --kill)
+jldg_stop_status=$?
+if (( jldg_stop_status == 0 )); then
+    eval "$jldg_stop_commands"
+    jldg_stop_status=$?
+fi
+printf 'stop status=%s\n' "$jldg_stop_status"
+unset jldg_stop_commands jldg_stop_status
 jldg-token >/dev/null
 printf 'stopped token status=%s\n' "$?"
 printenv JWT_USER_PATH
 ```
 
-期待結果：取得は非0となり、標準エラーに復旧案内が表示され、JWT_USER_PATH は !jldg-token のままである。この停止操作では現在のシェルの接続用変数も残る。helper は agent を停止しない。停止は発行済みトークンの取り消しではないので、他で使ったトークンの成否を停止判定に使わない。
+期待結果：stop status=0 で、現在のシェルの OIDC_SOCK・OIDCD_PID・OIDCD_PID_FILE が解除され、取得は非0となり、標準エラーに復旧案内が表示され、JWT_USER_PATH は !jldg-token のままである。他端末の接続用変数は変更されない。stop status が非0なら停止処理のエラーを確認する。helper は agent を停止しない。停止は発行済みトークンの取り消しではないので、他で使ったトークンの成否を停止判定に使わない。
 
 ```bash
 eval "$(oidc-keychain)"
@@ -358,7 +367,35 @@ if ( $?prompt ) then
 endif
 ```
 
-停止は Bash と同じ `oidc-keychain --kill >/dev/null` を使う。接続先以外の PID 変数はこの例では設定しないため、稼働確認には oidc-agent --status を使う。上記の変換例は標準の一時ディレクトリのソケットパスを前提とし、タブ・改行等を含む特殊なパスは対象としない。
+停止時には、次のように成功を確認してから現在の tcsh の接続用変数を解除する。oidc-keychain が出力する Bash 形式の削除コマンドは直接 eval しない。
+
+```csh
+oidc-keychain --kill
+set jldg_stop_status = $status
+if ( $jldg_stop_status == 0 ) then
+    unsetenv OIDC_SOCK OIDCD_PID OIDCD_PID_FILE
+endif
+echo "stop status=$jldg_stop_status"
+unset jldg_stop_status
+```
+
+停止成功時は接続用変数が解除され、JWT_USER_PATH は残ることを確認する。接続先以外の PID 変数は起動例では設定しないため、稼働確認には oidc-agent --status を使う。上記の変換例は標準の一時ディレクトリのソケットパスを前提とし、タブ・改行等を含む特殊なパスは対象としない。
+
+### 5.8 出力を抑制する箇所
+
+手動の Bash 起動・再接続・停止では、oidc-keychain の出力を eval して環境変数を反映し、PID や停止メッセージは表示する。tcsh の停止では出力を表示し、成功時に unsetenv で変数を解除する。以下の指定は目的があるため残している。
+
+| 箇所 | 残す理由 |
+|---|---|
+| Bash の自動接続例の `eval ... >/dev/null` | 端末を開くたびの PID 表示を省く |
+| 自動接続例と jldg-auth の `oidc-agent --status >/dev/null` | 正常時の詳細表示を省く。標準エラーは表示し、失敗時は復旧案内を出す |
+| tcsh 変換例の Bash 内部の `eval ... >/dev/null` | PID が tcsh に渡すコマンド文字列へ混入するのを防ぐ |
+| トークン確認の `jldg-token >/dev/null`・`oidc-token ... >/dev/null` | トークンを画面に出さず終了状態で確認する |
+| 取得確認の `gfexport ... >/dev/null` | 取得ファイルの内容を画面に出さず終了状態で確認する |
+| jldg-auth の `command -v ... >/dev/null` | コマンドの所在表示を省く。見つからなければ helper が明示的にエラーを出す |
+| jldg-token の `oidc-token ... </dev/null` | 出力の抑制ではなく、Gfarm 等の呼び出し元の標準入力を消費しないための指定 |
+
+上記で標準出力を捨てる指定は標準エラーを隠さない。ただし、oidc-agent 5.3.6 本体の service は停止時に内部で一部の標準エラーを抑制するため、5.5の終了状態と停止後の取得確認も合わせて確認する。
 
 ## 6. 再認証・中断・失敗時の確認
 

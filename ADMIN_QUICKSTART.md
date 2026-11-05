@@ -63,7 +63,7 @@ sudoedit /etc/oidc-agent/config
 }
 ```
 
-利用者側設定・起動オプションによる上書きがないことも確認する。issuer 設定は `issuer` を一致させ、`pw-store` を `true` にする。これにより `oidc-add jldg` の CLI 入力とパスワードのメモリ保持が既定となり、`--pw-prompt=cli`・`--pw-store` を省略できる。設定変更後は、同じ利用者の他端末への影響を確認したうえで、その利用者が `oidc-keychain --kill >/dev/null` で既存 agent を停止する。
+利用者側設定・起動オプションによる上書きがないことも確認する。issuer 設定は `issuer` を一致させ、`pw-store` を `true` にする。これにより `oidc-add jldg` の CLI 入力とパスワードのメモリ保持が既定となり、`--pw-prompt=cli`・`--pw-store` を省略できる。設定変更後は、同じ利用者の他端末への影響を確認したうえで、その利用者の Bash で `eval "$(oidc-keychain --kill)"` を実行して既存 agent を停止する。
 
 ## 4. 環境と agent を準備する（一般利用者）
 
@@ -125,10 +125,12 @@ printf 'gfexport status=%s\n' "$?"
 
 **確認：** jldg が読み込み済みで各 status が0となる。パスは実際の検証用パスへ置き換える。他方式へのフォールバックを無効にするかログで XOAUTH2 の使用を確認し、`GFARM_SASL_PASSWORD` や `sasl_password` 等の別設定が使われていないことも確かめる。
 
+`>/dev/null` は、トークンや取得ファイルの内容を画面に出さないために付けている。エラーは表示し、成否は各 status で確認する。
+
 ## 7. 再ログイン・失効・失敗・停止を確認する
 
 - 再ログイン後は4節と同じ手順で環境設定を読み込み、`oidc-keychain` で再接続し、`oidc-add jldg` で読み込む。自動実行は任意であり、Bash・tcsh の設定例は [README](README.md#再ログイン時の自動接続読み込み任意) と [詳細版](ADMIN_GUIDE.md#57-tcsh) を参照する。
 - 検証用 refresh token の失効後、更新が必要になった状態で jldg-token が失敗し、標準エラーに復旧案内だけを追加することを確認する。有効なキャッシュが残っている場合、取得は成功し得る。
 - 再認証が必要なら `jldg-auth` を利用者が明示実行し、トークン・Gfarm を再確認する。ラッパーは再認証を開始しない。
 - 通信障害ではネットワークを復旧して再試行する。パスワード入力中の Ctrl-C では端末設定が戻り、agent や環境設定は残ることを確認する。
-- 停止は `oidc-keychain --kill >/dev/null` で行う。停止後も接続用変数と `JWT_USER_PATH` は残り、トークン取得は失敗して復旧案内を表示する。停止はトークンの取り消しではない。再開は4節の接続手順と `oidc-add jldg` を使い、再登録は行わない。
+- Bash での停止は `eval "$(oidc-keychain --kill)"` で行い、出力された接続用変数の削除コマンドも実行する。停止後も `JWT_USER_PATH` は残り、トークン取得は失敗して復旧案内を表示する。停止はトークンの取り消しではない。再開は4節の接続手順と `oidc-add jldg` を使い、再登録は行わない。詳細版の [停止の終了状態も確認する手順](ADMIN_GUIDE.md#55-停止と再読み込み) と [tcsh の手順](ADMIN_GUIDE.md#57-tcsh) も参照する。

@@ -139,7 +139,7 @@ main() {
     }
     # Trusted, administrator-managed Bash settings, including an options array.
     source "$auth_config" || return 1
-    if ! oidc-agent --status >/dev/null 2>&1; then
+    if ! oidc-agent --status >/dev/null; then
         printf '%s\n' 'Cannot connect to oidc-agent. Start or reconnect to your agent, then retry.' >&2
         return 1
     fi
