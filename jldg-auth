@@ -38,13 +38,8 @@ show_gen_output() {
         line=''
         [[ -n $port ]] || continue
         printf '\nBrowser authentication:
-Use a browser with the JLDG certificate installed in either case.
-
-Browser on the same machine as oidc-agent:
-  Open the authorization URL directly. No SSH forwarding is needed.
-
-Browser on a different PC:
-  In another terminal on that PC, add these options before the destination
+  Use a browser on your PC with the JLDG certificate installed.
+  In another terminal on your PC, add these options before the destination
   in your usual SSH command to the machine running oidc-agent:
 
     -N -o ExitOnForwardFailure=yes -L %s:localhost:%s -D 1080
