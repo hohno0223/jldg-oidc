@@ -1,21 +1,21 @@
 # JLDG OIDC 認証補助
 
-JLDG の初回登録・ブラウザ再認証を補助し、Gfarm が必要時にトークンを取得するための環境を設定する。agent の起動・再接続・停止とアカウントの読み込みは、利用者が oidc-agent の標準機能で行う。
+JLDG の初回登録・ブラウザ再認証を補助し、Gfarm が必要時にトークンを取得するための環境を設定する。agent の起動・再接続・停止には標準の `oidc-keychain`、アカウントの読み込みには `oidc-add` を使う。
 
-管理者による導入・基本確認は [簡易版](ADMIN_QUICKSTART.md)、設定の詳細と障害対応は [管理者マニュアル](ADMIN_GUIDE.md) を参照する。以下の配置先は `/usr/local/share/jldg` とする。
+管理者による導入・基本確認は [簡易版](ADMIN_QUICKSTART.md)、設定の詳細と障害対応は [管理者マニュアル](ADMIN_GUIDE.md) を参照する。以下の配置先は `/usr/local/jldg` とする。
 
 ## 環境設定
 
 Bash では次を読み込む。
 
 ```bash
-source /usr/local/share/jldg/jldg-env.sh
+source /usr/local/jldg/jldg-env.sh
 ```
 
 tcsh では次を読み込む。
 
 ```csh
-source /usr/local/share/jldg/jldg-env.csh
+source /usr/local/jldg/jldg-env.csh
 ```
 
 環境設定スクリプトは、helper の配置ディレクトリを `PATH` に追加し、`JWT_USER_PATH` を `!jldg-token` に設定する。繰り返し読み込んでも同じディレクトリを重複追加しない。agent の起動・接続・認証やトークン取得は行わず、`OIDC_SOCK` 等の接続用変数も変更しない。
@@ -26,21 +26,46 @@ source /usr/local/share/jldg/jldg-env.csh
 
 ## agent の準備とアカウントの読み込み
 
-利用者本人として agent を起動するか、既存 agent に再接続する。Bash では標準コマンドを次のように利用できる。
+利用者本人の Bash で次を実行する。初回の起動と、別端末・再ログイン後の再接続は同じコマンドで行う。
 
 ```bash
-eval "$(oidc-agent-service use)" >/dev/null
+eval "$(oidc-keychain)"
+oidc-agent --status
 ```
 
-`use` は起動済みなら再利用し、なければ新しく起動する。再ログイン時の手入力を省くには、利用者の Bash 起動設定から実行する。tcsh の接続方法は [管理者マニュアル](ADMIN_GUIDE.md#57-tcsh) を参照する。Bash 形式を返す service の出力を tcsh で直接 `eval` しない。
+同じ利用者・同じホストの agent が起動済みなら再利用し、なければ新しく起動する。`eval` は接続先を現在のシェルに反映するために必要である。`oidc-agent --status` で接続と稼働設定を確認できる。tcsh の接続方法は [管理者マニュアル](ADMIN_GUIDE.md#57-tcsh) を参照する。5.3.6 の `oidc-keychain` は Bash 形式を返すため、tcsh でその出力を直接 `eval` しない。
 
 保存済みアカウントを新しい agent に読み込む場合は、同じシェルで次を実行する。
 
 ```bash
-oidc-add --pw-prompt=cli --pw-store jldg
+oidc-add jldg
 ```
 
-必要に応じて暗号化パスワードを入力する。正常な読み込み済みアカウントでは通常、再入力は不要である。標準の `oidc-keychain --accounts jldg` によるログイン時の読み込みも選択できる。agent の状態確認は `oidc-agent --status`、読み込み一覧は `oidc-add --loaded` を使う。
+必要に応じて暗号化パスワードを端末で入力する。正常な読み込み済みアカウントでは通常、再入力は不要である。管理者が [導入手順](ADMIN_QUICKSTART.md#3-設定する管理者) の設定を反映済みなら、CLI 入力とパスワードのメモリ保持は既定となり、`--pw-prompt=cli` と `--pw-store` は省略できる。未登録なら、先に「初回登録と再認証」節の `jldg-auth` を実行する。読み込み一覧は `oidc-add --loaded` で確認する。
+
+本手順では `oidc-keychain --accounts jldg` を使わず、接続後に `oidc-add jldg` を実行する。5.3.6 の keychain は `oidc-prompt` が見つかると、内部の oidc-add に `--pw-prompt=gui` を付け、管理者の CLI 既定値を上書きするためである。以降の手動の oidc-add にまで影響する設定変更ではない。[5.3.6 の実装](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/src/oidc-keychain/oidc-keychain)
+
+## 再ログイン時の自動接続・読み込み（任意）
+
+初回登録後、毎回の手入力を省きたい利用者は、次を `~/.bashrc` に追加できる。自動設定は必須ではない。
+
+```bash
+if [[ $- == *i* && -t 0 ]]; then
+    source /usr/local/jldg/jldg-env.sh
+    eval "$(oidc-keychain)" >/dev/null
+    if oidc-agent --status >/dev/null; then
+        oidc-add jldg
+    else
+        printf '%s\n' 'JLDG: Could not connect to oidc-agent. Run oidc-agent --status and retry the connection steps.' >&2
+    fi
+fi
+```
+
+対話端末を開くたびに接続し、必要なら保存済みアカウントを読み込む。この自動実行例では、毎回の PID と正常時の状態表示を抑えるため `>/dev/null` を付けている。標準エラーは表示し、接続確認に失敗した場合は復旧案内を出してアカウントを読み込まない。新しい agent への読み込みでは暗号化パスワードを求められる場合がある。再認証が必要なら `jldg-auth` を手動実行する。
+
+これはシェル起動時の明示的な oidc-add 実行であり、トークン要求時の自動読み込みを止める `autoload: false` はそのままでよい。
+
+Bash のログインシェルでは `~/.bash_profile` 等から `~/.bashrc` が読み込まれることを確認する。読み込まれない構成では、このブロックをログイン時の起動ファイルに置く。複数箇所へ重複して追加しない。tcsh の `~/.tcshrc` 用の例は [管理者マニュアル](ADMIN_GUIDE.md#57-tcsh) を参照する。シェル起動ファイルは本ツールが自動編集することはない。
 
 ## 初回登録と再認証
 
@@ -85,8 +110,8 @@ Gfarm は `JWT_USER_PATH` の指定により `jldg-token` を実行する。こ�
 
 | 状況 | 操作 |
 |---|---|
-| agent に接続できない | 利用者の通常の方法で起動・再接続する |
-| 保存済みアカウントが未読み込み | `oidc-add --pw-prompt=cli --pw-store jldg` |
+| agent に接続できない | `oidc-keychain` で起動・再接続する（上記のシェル別手順） |
+| 保存済みアカウントが未読み込み | `oidc-add jldg` |
 | 初回登録・再認証が必要 | `jldg-auth` |
 | OP への通信障害 | 通信を復旧してから再試行する |
 
@@ -104,8 +129,14 @@ jldg-token >/dev/null
 
 - helper はパスワード入力前の端末設定を保存し、成功・失敗・Ctrl-C 等による終了時に復元する。入力文字が見えなくなったら `stty echo` を実行する。SIGKILL では復元できない。
 - 登録・再認証を中断しても、agent やアカウントは自動で停止・削除・アンロードしない。環境変数も変更しない。認証失敗時は原因を解消してから明示的に再実行する。
-- agent を停止するときは利用者の通常の方法を使う。service 管理なら `oidc-agent-service stop` を使える。同じ利用者の他端末・他アカウントにも影響する。停止は発行済みトークンの取り消しではない。
-- 再ログイン後は環境設定を読み込み直し、利用者の agent 連携で再接続する。agent が残っていれば読み込み済みアカウントも再利用でき、新しく起動した場合は保存済みアカウントを読み込む。
+- agent の停止は次のコマンドで行う。Bash・tcsh 共通であり、同じ利用者の他端末・他アカウントにも影響する。停止は発行済みトークンの取り消しではない。
+
+  ```bash
+  oidc-keychain --kill >/dev/null
+  ```
+
+  現在のシェルの接続用変数と `JWT_USER_PATH` は残る。再開時は上記と同じ `oidc-keychain` の接続手順を実行し、`oidc-add jldg` で読み込む。保存済みアカウントの再登録は不要である。
+- ログアウトだけでは agent が残る場合がある。再ログイン後は上記の手順を手動または任意の起動設定で実行する。agent が残っていれば読み込み済みアカウントも再利用でき、新しく起動した場合は保存済みアカウントを読み込む。
 - 同じアカウントの同時登録・同時再認証や、ホームを共有する複数ホスト間の競合は helper が制御しない。
 - クライアント JSON は管理者が正しく設定済みであることを前提とし、helper は読み取り可否だけ確認する。復号パスワードを要求された場合は、管理者が JSON の構文・文字コードを確認する。
 - 遅れて表示される oidc-gen の生成開始・受付の3行と失敗時の state 再照会コマンドの案内は抑制し、認証 URL・入力案内・失敗理由は表示する。

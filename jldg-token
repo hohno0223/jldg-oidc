@@ -16,7 +16,7 @@ fi
 ((rc != 0)) || rc=1
 printf '%s\n' 'JLDG token retrieval failed. Resolve the cause in a terminal, then retry:' \
     '  Check your oidc-agent connection and the original error above.' \
-    '  Saved account not loaded: oidc-add --pw-prompt=cli --pw-store jldg' \
+    '  Saved account not loaded: oidc-add jldg' \
     '  First registration or reauthentication required: jldg-auth' \
     '  For network errors, restore connectivity before retrying.' >&2
 exit "$rc"

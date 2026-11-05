@@ -19,13 +19,24 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 umask 077
 
-show_forward_options() {
-    local line port
+show_gen_output() {
+    local char line='' port
     # Only the localhost redirect URIs configured for JLDG are supported.
     local pattern='[?&]redirect_uri=http%3[Aa]%2[Ff]%2[Ff]localhost%3[Aa]([0-9]+)(&|[[:space:]]|$)'
-    while IFS= read -r line; do
-        [[ $line =~ $pattern ]] || continue
-        port=${BASH_REMATCH[1]}
+    # One writer emits both the original text and guidance. Forward prompts
+    # immediately, but insert guidance only after a complete URL line.
+    while IFS= read -r -N 1 char; do
+        printf '%s' "$char"
+        if [[ $char != $'\n' ]]; then
+            line+=$char
+            continue
+        fi
+        port=''
+        if [[ $line =~ $pattern ]]; then
+            port=${BASH_REMATCH[1]}
+        fi
+        line=''
+        [[ -n $port ]] || continue
         printf '\nBrowser authentication:
 Use a browser with the JLDG certificate installed in either case.
 
@@ -96,11 +107,11 @@ filter_gen_output() {
 run_gen() {
     (
         set -o pipefail
-        # Filter stdout first, then handle the merged stream in one filter
-        # so concurrent stdout writes cannot split stderr text into characters.
+        # Filter stdout first, then serialize the display of the merged stream
+        # and forwarding guidance so they cannot interrupt each other's lines.
         OIDC_AGENT_NOCOLOR=1 oidc-gen "${JLDG_GEN_OPTIONS[@]}" "$@" \
             2>&1 > >(filter_gen_stdout) |
-            filter_gen_output | tee >(cat >&2) | show_forward_options
+            filter_gen_output | show_gen_output
     )
 }
 
@@ -116,7 +127,7 @@ main() {
         printf '%s\n' 'Usage: jldg-auth' >&2
         return 2
     fi
-    for cmd in oidc-agent oidc-gen tee cat stty; do
+    for cmd in oidc-agent oidc-gen stty; do
         command -v "$cmd" >/dev/null || {
             printf 'Required command not found: %s\n' "$cmd" >&2
             return 1

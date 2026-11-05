@@ -1,6 +1,6 @@
 # Source this file in Bash or a POSIX shell; do not execute it.
 # Set JLDG_HELPER_DIR before sourcing only for a nonstandard installation.
-_jldg_helper_dir=${JLDG_HELPER_DIR:-/usr/local/share/jldg}
+_jldg_helper_dir=${JLDG_HELPER_DIR:-/usr/local/jldg}
 case :${PATH-}: in
     *:"$_jldg_helper_dir":*) ;;
     *) PATH=$_jldg_helper_dir${PATH:+:$PATH} ;;

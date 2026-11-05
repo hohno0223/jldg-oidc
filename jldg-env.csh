@@ -1,6 +1,6 @@
 # Source this file in tcsh; do not execute it.
 # Set JLDG_HELPER_DIR before sourcing only for a nonstandard installation.
-set _jldg_helper_dir = "/usr/local/share/jldg"
+set _jldg_helper_dir = "/usr/local/jldg"
 if ( $?JLDG_HELPER_DIR ) then
     if ( "$JLDG_HELPER_DIR" != "" ) then
         set _jldg_helper_dir = "$JLDG_HELPER_DIR"

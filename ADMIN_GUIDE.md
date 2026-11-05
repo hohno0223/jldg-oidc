@@ -2,7 +2,7 @@
 
 本書は、実行ホストへのインストールと、利用者としての動作確認を行う手順を示す。利用者に案内する環境設定・初回登録・再認証・SSH 転送の手順は [README.md](README.md) を参照する。
 
-以下の例ではスクリプトを `/usr/local/share/jldg` に配置する。配置先を変更する場合は、本書と利用者向けの操作例を合わせて変更する。
+以下の例ではスクリプトを `/usr/local/jldg` に配置する。配置先を変更する場合は、本書と利用者向けの操作例を合わせて変更する。
 
 ## 1. 作業の分担と前提
 
@@ -20,8 +20,8 @@
 必要なものは以下のとおりである。
 
 - Linux、Bash、oidc-agent 5 系。tcsh 利用者にも案内する場合は tcsh。
-- `oidc-agent-service`、`oidc-agent`、`oidc-gen`、`oidc-add`、`oidc-token` と、それらのパッケージ依存関係。
-- 認証補助が使う `tee`、`cat`、`stty` 等の標準コマンド。helper の実行に Python・jq 等は追加で必要ない（oidc-agent パッケージ自体の依存関係は別）。
+- `oidc-keychain`、`oidc-agent`、`oidc-gen`、`oidc-add`、`oidc-token` と、それらのパッケージ依存関係（keychain が内部で使う `oidc-agent-service` を含む）。
+- 認証補助が使う `stty` 等の標準コマンド。helper の実行に Python・jq 等は追加で必要ない（oidc-agent パッケージ自体の依存関係は別）。
 - `JWT_USER_PATH` の `!コマンド` 形式に対応した Gfarm クライアントと XOAUTH2 メカニズム。
 - 実行ホストから OP への HTTPS 接続と、JLDG の証明書がインストールされたブラウザ。
 - 別 PC のブラウザを使う場合は、PC から実行ホストへの SSH ローカルポート転送と動的転送（SOCKS5 proxy）。ブラウザから OP へはこの proxy を通して接続する。同じマシンのブラウザを使う場合は、この SSH 転送は不要。
@@ -36,7 +36,7 @@ oidc-agent は、使用する OS に対応したパッケージと依存関係�
 実行ホストで以下を確認する。最終的には検証用利用者のログイン環境でも同じコマンドが見つかる必要がある。
 
 ```bash
-command -v bash stty oidc-agent-service oidc-agent oidc-gen oidc-add oidc-token tee cat
+command -v bash stty oidc-keychain oidc-agent oidc-gen oidc-add oidc-token
 oidc-agent --version
 oidc-gen --version
 oidc-add --version
@@ -79,9 +79,9 @@ Gfarm が検証する audience がトークンに入るよう OP を設定する
 配布ファイルのあるディレクトリで実行する。
 
 ```bash
-sudo install -d -o root -g root -m 0755 /usr/local/share/jldg
-sudo install -o root -g root -m 0755 jldg-auth jldg-token /usr/local/share/jldg/
-sudo install -o root -g root -m 0644 jldg-env.sh jldg-env.csh /usr/local/share/jldg/
+sudo install -d -o root -g root -m 0755 /usr/local/jldg
+sudo install -o root -g root -m 0755 jldg-auth jldg-token /usr/local/jldg/
+sudo install -o root -g root -m 0644 jldg-env.sh jldg-env.csh /usr/local/jldg/
 sudo install -d -o root -g root -m 0755 /etc/oidc-agent/issuer.config.d
 sudo install -o root -g root -m 0644 jldg-auth.conf jldg-client.json /etc/oidc-agent/
 sudo install -o root -g root -m 0644 issuer.config.d/jldg /etc/oidc-agent/issuer.config.d/jldg
@@ -109,7 +109,7 @@ issuer 設定は次の内容を基本とする。`issuer` はクライアント 
 }
 ```
 
-`pw-store` は、更新された refresh token を暗号化アカウントファイルへ保存するために、暗号化パスワードを agent のメモリに保持する設定である。平文パスワードファイルは作成しない。保存済みアカウントの読み込みでは、利用者が `oidc-add --pw-prompt=cli --pw-store jldg` を実行する。[issuer 設定の公式説明](https://indigo-dc.github.io/oidc-agent/configuration/issuers/)
+`pw-store` は、更新された refresh token を暗号化アカウントファイルへ保存するために、暗号化パスワードを agent のメモリに保持する設定である。平文パスワードファイルは作成しない。この issuer 設定が有効なら、`oidc-add jldg` に `--pw-store` を付ける必要はない。[issuer 設定の公式説明](https://indigo-dc.github.io/oidc-agent/configuration/issuers/)
 
 同じ issuer の設定が `/etc/oidc-agent/issuer.config` や利用者側にも存在する場合は、そこで `pw-store` が上書きされていないか確認する。`issuer.config.d/jldg` を配置しただけで他の設定より優先されるとは限らない。
 
@@ -123,7 +123,7 @@ issuer 設定は次の内容を基本とする。`issuer` はクライアント 
 sudoedit /etc/oidc-agent/config
 ```
 
-以下は既存設定へ反映する差分であり、ファイル全体を置き換えるものではない。`oidc-gen`、`oidc-add`、`oidc-token` 等の他のセクションも残す。設定ファイルが存在しない場合は、5 系の導入状態と配布パッケージの既定設定を確認してから作業する。
+以下は既存設定へ反映する差分であり、ファイル全体を置き換えるものではない。`oidc-agent`・`oidc-add` の該当項目を編集し、他の項目・セクションも残す。設定ファイルが存在しない場合は、5 系の導入状態と配布パッケージの既定設定を確認してから作業する。
 
 ```json
 {
@@ -131,6 +131,9 @@ sudoedit /etc/oidc-agent/config
     "auto-reauthenticate": false,
     "autoload": false,
     "auto-gen": false
+  },
+  "oidc-add": {
+    "pw-prompt": "cli"
   }
 }
 ```
@@ -140,6 +143,7 @@ sudoedit /etc/oidc-agent/config
 | `auto-reauthenticate: false` | agent は自動で再認証を始めず、`jldg-auth` を利用者が端末で実行する |
 | `autoload: false` | トークン要求時の自動読み込みを無効にし、未読み込み時は利用者が oidc-add で読み込む |
 | `auto-gen: false` | トークン要求をきっかけとする設定の自動作成を無効にする。`jldg-auth` による明示的な初回登録は可能 |
+| `oidc-add.pw-prompt: "cli"` | 手動のアカウント読み込みで暗号化パスワードを端末から入力する |
 
 その他は次の既定値を基本とする。
 
@@ -152,11 +156,11 @@ sudoedit /etc/oidc-agent/config
 | `oidc-agent.debug_logging` | `false` | 通常運用ではデバッグログを無効にする |
 | `oidc-gen.default_gpg_key` | `null` | 本手順では GPG 鍵の代わりに暗号化パスワードを使う |
 
-`--no-scheme`、`--no-url-call`、CLI 入力方式等は jldg-auth.conf で指定し、`--time=60` は jldg-token が指定する。利用者が読み込むときのパスワード保持は oidc-add の --pw-store を使う。設定項目の基準は [公式 5.3.6 の既定設定](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/config/config) を参照する。
+`--no-scheme`、`--no-url-call`、登録・再認証の CLI 入力方式等は jldg-auth.conf で指定し、`--time=60` は jldg-token が指定する。通常の読み込みは上記の CLI 既定値と issuer の `pw-store: true` により `oidc-add jldg` だけで行える。全 issuer に適用される `oidc-add.store-pw` は変更不要である。設定項目の基準は [公式 5.3.6 の既定設定](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/config/config) を参照する。
 
 利用者の oidc-agent ディレクトリ内の `config` はシステム設定を上書きできる。利用者が `OIDC_USER_CONFIG` で別ファイルを指定している場合も確認する。また、システム側・利用者側の `oidc-agent-service.options` に既存の起動オプションがないか確認する。これらの設定は JLDG 以外のアカウントにも影響する。[設定の優先順位](https://indigo-dc.github.io/oidc-agent/configuration/config/)・[service の設定](https://indigo-dc.github.io/oidc-agent/usage/oidc-agent-service/)
 
-設定を変えても、起動済み agent の動作はそのままである。利用者として `oidc-agent-service stop` を実行してから、利用者の標準の起動・再接続手順を実行して反映する。helper は起動・再接続・停止を一切行わない。起動時と同じ `TMPDIR` を使い、他端末への影響を確認する。スクリプトは起動済み agent の設定を検査しない。
+設定を変えても、起動済み agent の動作はそのままである。利用者として `oidc-keychain --kill >/dev/null` を実行してから、5節の起動・再接続手順を実行して反映する。helper は起動・再接続・停止を一切行わない。起動時と同じ `TMPDIR` を使い、他端末への影響を確認する。スクリプトは起動済み agent の設定を検査しない。
 
 ### 3.3.1 管理者指定の oidc-gen オプション
 
@@ -174,7 +178,7 @@ JLDG_GEN_OPTIONS=(
 
 このオプションは初回登録と再認証の両方に適用する。初回登録には helper が --file と短縮名 jldg を、再認証には --reauthenticate と短縮名 jldg を追加する。標準以外の設定ファイルを使う場合は利用者の `JLDG_AUTH_CONFIG` で指定する。短縮名を変更する機能は設けず、ラッパーと登録先は jldg に統一する。
 
-環境設定の `JLDG_HELPER_DIR` は配置先を変更した場合だけ指定する。既定は `/usr/local/share/jldg`。カレントディレクトリに依存しない。PATH に配置先を加え、JWT_USER_PATH を !jldg-token に設定するだけで、設定読み込み中に agent コマンドを実行しない。
+環境設定の `JLDG_HELPER_DIR` は配置先を変更した場合だけ指定する。既定は `/usr/local/jldg`。カレントディレクトリに依存しない。PATH に配置先を加え、JWT_USER_PATH を !jldg-token に設定するだけで、設定読み込み中に agent コマンドを実行しない。
 
 ### 3.4 Gfarm の準備
 
@@ -187,13 +191,13 @@ Gfarm 管理者は TLS、XOAUTH2、信頼する issuer、要求する audience�
 実行ホスト上で、agent を起動せずに確認する。
 
 ```bash
-ls -ld /usr/local/share/jldg /etc/oidc-agent /etc/oidc-agent/issuer.config.d
-ls -l /usr/local/share/jldg/jldg-auth /usr/local/share/jldg/jldg-token
-ls -l /usr/local/share/jldg/jldg-env.sh /usr/local/share/jldg/jldg-env.csh
+ls -ld /usr/local/jldg /etc/oidc-agent /etc/oidc-agent/issuer.config.d
+ls -l /usr/local/jldg/jldg-auth /usr/local/jldg/jldg-token
+ls -l /usr/local/jldg/jldg-env.sh /usr/local/jldg/jldg-env.csh
 ls -l /etc/oidc-agent/jldg-auth.conf /etc/oidc-agent/jldg-client.json
 (
     for jldg_script in jldg-auth jldg-token jldg-env.sh; do
-        bash -n "/usr/local/share/jldg/$jldg_script" || exit
+        bash -n "/usr/local/jldg/$jldg_script" || exit
     done
     bash -n /etc/oidc-agent/jldg-auth.conf
 )
@@ -201,7 +205,7 @@ ls -l /etc/oidc-agent/jldg-auth.conf /etc/oidc-agent/jldg-client.json
 
 配置ファイルは root 所有で、実行する2コマンドは実行可能、source する環境設定と管理者設定は一般利用者が読めることを確認する。helper の構文検査はファイルごとに行う。tcsh 用は5.7の実際の source 操作で確認する。
 
-クライアント JSON の client ID が置換済みで、issuer・scope・redirect URI が OP と一致すること、issuer 設定の pw-store が true であることを確認する。helper は JSON の構文や必須項目を事前検査しない。システム側の3設定だけでなく、利用者側設定・service オプションによる上書きも確認する。
+クライアント JSON の client ID が置換済みで、issuer・scope・redirect URI が OP と一致すること、issuer 設定の pw-store が true であること、oidc-add の pw-prompt が cli であることを確認する。helper は JSON の構文や必須項目を事前検査しない。システム側だけでなく、利用者側設定・service オプションによる上書きも確認する。
 
 ## 5. 利用者としての動作確認
 
@@ -210,15 +214,15 @@ ls -l /etc/oidc-agent/jldg-auth.conf /etc/oidc-agent/jldg-client.json
 ### 5.1 環境設定・agent 準備・初回登録
 
 ```bash
-source /usr/local/share/jldg/jldg-env.sh
+source /usr/local/jldg/jldg-env.sh
 command -v jldg-auth jldg-token
 printenv JWT_USER_PATH
-eval "$(oidc-agent-service use)" >/dev/null
+eval "$(oidc-keychain)"
 oidc-agent --status
 oidc-gen --accounts
 ```
 
-期待結果：両コマンドが配置先から見つかり、JWT_USER_PATH が !jldg-token となる。利用者が起動・再接続した agent に通信できる。OIDCD_PID が空でも helper は PID を使わず、接続確認の成否で判断する。
+期待結果：両コマンドが配置先から見つかり、JWT_USER_PATH が !jldg-token となる。oidc-keychain は同じ利用者・同じホストの agent があれば再利用し、なければ起動する。eval で接続先を現在のシェルに反映し、oidc-agent --status で通信できることを確認する。初回起動も再接続もこの手順を使う。OIDCD_PID が空でも helper は PID を使わず、接続確認の成否で判断する。
 
 agent の稼働版が5系、Autoload・Auto Re-authenticate が false、Webserver が true、Confirm が false であることを確認する。auto-gen は設定ファイルでも確認する。項目の表記は導入版に従う。
 
@@ -279,7 +283,7 @@ printf 'gfexport status=%s\n' "$?"
 新しい agent には利用者が標準コマンドで読み込む。
 
 ```bash
-oidc-add --pw-prompt=cli --pw-store jldg
+oidc-add jldg
 jldg-token >/dev/null
 printf 'loaded token status=%s\n' "$?"
 oidc-token --force-new jldg >/dev/null
@@ -288,64 +292,73 @@ printf 'refresh status=%s\n' "$?"
 
 必要なら暗号化パスワードを入力し、正常なアカウントではブラウザ認証なしで成功する。--force-new はこの検証で更新経路を明示確認するための標準操作であり、helper やラッパーは強制更新しない。OP が refresh token をローテーションする場合は、次節の停止・再読み込み後にも取得できることで保存を確認する。
 
+CLI 入力とパスワード保持は3節の管理者設定による。`--pw-prompt=cli`・`--pw-store` を省略しても、必要な入力が端末に表示されることを確認する。本手順では keychain に `--accounts jldg` を付けない。5.3.6 は `oidc-prompt` が見つかると内部の oidc-add に `--pw-prompt=gui` を付け、CLI 既定値を上書きするためである。これはその内部呼び出しだけに適用され、以降の手動の oidc-add の既定値は変えない。[5.3.6 の実装](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/src/oidc-keychain/oidc-keychain)
+
 ### 5.5 停止と再読み込み
 
-同じ利用者の共有 agent を使う他端末への影響を確認する。service 管理の場合の例：
+同じ利用者の共有 agent を使う他端末・他アカウントへの影響を確認してから停止する。
 
 ```bash
-oidc-agent-service stop >/dev/null
+oidc-keychain --kill >/dev/null
 jldg-token >/dev/null
 printf 'stopped token status=%s\n' "$?"
 printenv JWT_USER_PATH
 ```
 
-期待結果：取得は非0となり、標準エラーに復旧案内が表示され、JWT_USER_PATH は !jldg-token のままである。helper はサービスを停止しない。停止は発行済みトークンの取り消しではないので、他で使ったトークンの成否を停止判定に使わない。
+期待結果：取得は非0となり、標準エラーに復旧案内が表示され、JWT_USER_PATH は !jldg-token のままである。この停止操作では現在のシェルの接続用変数も残る。helper は agent を停止しない。停止は発行済みトークンの取り消しではないので、他で使ったトークンの成否を停止判定に使わない。
 
 ```bash
-eval "$(oidc-agent-service use)" >/dev/null
-oidc-add --pw-prompt=cli --pw-store jldg
+eval "$(oidc-keychain)"
+oidc-add jldg
 jldg-token >/dev/null
 ```
 
-必要ならパスワードを入力し、再読み込み後にトークン取得と5.3の Gfarm 接続を確認する。保存済みファイルの一覧には標準の oidc-gen --accounts を使える。
+必要ならパスワードを入力し、再読み込み後にトークン取得と5.3の Gfarm 接続を確認する。停止しても保存済みアカウントは残り、再登録は不要である。保存済みファイルの一覧には標準の oidc-gen --accounts を使える。
 
 ### 5.6 再ログインと自動接続
 
-再ログイン後は、環境設定の読み込みと標準 agent 連携による再接続を行う。利用者の Bash 対話ログイン時に自動化する場合は、例えば ~/.bash_profile に次を記載する。helper は起動ファイルを自動編集しない。
+再ログイン後は5.1と同じ環境設定・keychain 接続を行い、保存済みアカウントを oidc-add jldg で読み込む。手入力を省く任意の ~/.bashrc 設定は [README](README.md#再ログイン時の自動接続読み込み任意) を参照する。初回登録後に利用者自身が追加し、helper は起動ファイルを自動編集しない。
 
-```bash
-if [[ $- == *i* ]]; then
-    source /usr/local/share/jldg/jldg-env.sh
-    eval "$(oidc-agent-service use)" >/dev/null
-fi
-```
-
-これは起動・再接続だけで、アカウントの読み込みは利用者が oidc-add で行う。標準の oidc-keychain --accounts jldg を使ってログイン時に読み込む選択もあるが、必要ならパスワード入力を求める。[service](https://indigo-dc.github.io/oidc-agent/usage/oidc-agent-service/)・[keychain](https://indigo-dc.github.io/oidc-agent/usage/oidc-keychain/)
+自動設定では対話端末を開くと接続と読み込みを行い、新しい agent への読み込みでは暗号化パスワードを求める場合がある。バッチ実行時には読み込みを行わない。接続確認の標準エラーは隠さず、失敗時は復旧案内を表示して読み込みを省略することも確認する。新しくログインし、oidc-agent --status・oidc-add --loaded・jldg-token >/dev/null と Gfarm 接続を確認する。再認証は自動で始めず、必要なら jldg-auth を利用者が実行する。[keychain の公式説明](https://indigo-dc.github.io/oidc-agent/usage/oidc-keychain/)
 
 同じ利用者・同じホストの agent が残っていれば共有でき、再読み込みなしで使える。OS のセッション終了設定やホスト再起動で agent が停止していたら新しく起動し、保存済みアカウントを読み込む。TMPDIR・OIDC_CONFIG_DIR 等の環境を利用者の連携と揃える。helper は PID 補正や接続情報の保存を行わない。
 
 ### 5.7 tcsh
 
-環境設定だけが tcsh 用になり、jldg-auth と jldg-token は Bash 実装をコマンドとして直接実行する。eval や source を付けない。確認した service は Bash 形式の変数設定を出力するため、tcsh で直接 eval しない。
+環境設定だけが tcsh 用になり、jldg-auth と jldg-token は Bash 実装をコマンドとして直接実行する。eval や source を付けない。5.3.6 の oidc-keychain は Bash 形式の変数設定を出力するため、その出力を tcsh で直接 eval しない。
 
-利用者の既存の agent 連携を利用するか、検証時には、Bash で標準 service を利用してからその接続環境を継承した tcsh を開ける。
-
-```bash
-bash -c 'eval "$(oidc-agent-service use)" >/dev/null && exec tcsh'
-```
-
-この例は新しい tcsh を開き、元のシェルの環境変数は変更しない。新しい tcsh で次を実行する。
+現在の tcsh に接続先を設定するには、次のように keychain の出力を Bash で評価し、接続に必要な OIDC_SOCK を tcsh に渡す。初回起動・再接続・停止後の再開に同じ手順を使う。Bash 内部の `>/dev/null` は PID 表示が変換結果に混ざるのを防ぐために必要である。
 
 ```csh
-source /usr/local/share/jldg/jldg-env.csh
+source /usr/local/jldg/jldg-env.csh
+eval `bash -c 'eval "$(oidc-keychain)" >/dev/null; printf "setenv OIDC_SOCK %q;\n" "$OIDC_SOCK"'`
 printenv JWT_USER_PATH
 oidc-agent --status
-oidc-add --pw-prompt=cli --pw-store jldg
+oidc-add jldg
 jldg-token >/dev/null
 echo "token status=$status"
 ```
 
 初回登録・再認証が必要なら jldg-auth を直接実行する。保存済みアカウントが単に未読み込みなら oidc-add を使う。期待結果は !jldg-token と token status=0。同じ tcsh から Gfarm 接続も確認する。環境設定を再度 source しても PATH が重複せず、OIDC_SOCK 等の agent 変数を変更しないことを確認する。
+
+初回登録後、再ログイン時の接続・読み込みを自動化したい利用者は、任意で ~/.tcshrc に次を追加できる。対話端末でのみ動作し、必要なら暗号化パスワードを入力する。
+
+```csh
+if ( $?prompt ) then
+    if ( -t 0 ) then
+        source /usr/local/jldg/jldg-env.csh
+        eval `bash -c 'eval "$(oidc-keychain)" >/dev/null; printf "setenv OIDC_SOCK %q;\n" "$OIDC_SOCK"'`
+        oidc-agent --status >/dev/null
+        if ( $status == 0 ) then
+            oidc-add jldg
+        else
+            echo 'JLDG: Could not connect to oidc-agent. Run oidc-agent --status and retry the connection steps.' >> /dev/stderr
+        endif
+    endif
+endif
+```
+
+停止は Bash と同じ `oidc-keychain --kill >/dev/null` を使う。接続先以外の PID 変数はこの例では設定しないため、稼働確認には oidc-agent --status を使う。上記の変換例は標準の一時ディレクトリのソケットパスを前提とし、タブ・改行等を含む特殊なパスは対象としない。
 
 ## 6. 再認証・中断・失敗時の確認
 
