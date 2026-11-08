@@ -1,189 +1,148 @@
 # JLDG OIDC 認証補助
 
-JLDG の初回登録・ブラウザ再認証を補助し、Gfarm が必要時にトークンを取得するための環境を設定する。agent の起動・再接続・停止には標準の `oidc-keychain`、アカウントの読み込みには `oidc-add` を使う。クライアント機には手元の PC から SSH でログインし、ブラウザは手元の PC で使用する。
+JLDG の Gfarm をトークン認証（OpenID Connect）で利用するための、oidc-agent 用の補助スクリプトと設定ファイル一式である。
 
-本書は認証補助スクリプトの操作と動作の詳細を説明する。管理者による導入・基本確認は [簡易版](ADMIN_QUICKSTART.md)、設定の詳細と障害対応は [管理者マニュアル](ADMIN_GUIDE.md) を参照する。以下の配置先は `/usr/local/jldg` とする。
+- 利用者は、手元の PC のブラウザと JLDG ユーザ証明書で、JLDG の OpenID Provider（OP、`https://idp.jldg.org`）に本人確認を行う。
+- 実行ホスト（Gfarm クライアントを実行する JLDG クライアント）では、利用者ごとの oidc-agent（agent）が、リフレッシュトークン（RT）でアクセストークンを更新する。
+- Gfarm は、`JWT_USER_PATH` に設定された `jldg-auth --token` でアクセストークンを取得する。
+- agent の起動・接続・停止は、利用者が oidc-agent 標準の `oidc-keychain` で行う。jldg-auth は agent を起動・停止しない。
 
-## 環境設定
+## 文書一覧
 
-Bash では次を読み込む。
+| 読者 | 文書 | 内容 |
+| --- | --- | --- |
+| 利用者 | [USER_QUICKSTART.md](USER_QUICKSTART.md) | 初回登録から Gfarm の利用までの最短手順 |
+| 利用者 | [USER_GUIDE.md](USER_GUIDE.md) | 仕組み、再認証、困ったとき、停止、自動準備を含む手順書 |
+| 管理者 | [ADMIN_QUICKSTART.md](ADMIN_QUICKSTART.md) | 配置・設定・動作確認の最短手順 |
+| 管理者 | [ADMIN_GUIDE.md](ADMIN_GUIDE.md) | 設定の理由、詳しい確認項目、障害時の切り分け |
+| 保守担当者 | 本書 | ファイル構成と jldg-auth の動作仕様 |
+
+利用者向けの2文書は、ほかの文書を読まなくても使えるように書いている。
+
+## ファイル構成
+
+| ファイル | 配置先の例 | 役割 |
+| --- | --- | --- |
+| `jldg-auth` | `/usr/local/jldg/` | 利用準備、ブラウザ認証、Gfarm 向けのトークン取得 |
+| `jldg-env.sh` / `jldg-env.csh` | `/usr/local/jldg/` | Bash / tcsh 用の環境設定。PATH と `JWT_USER_PATH` を設定する |
+| `jldg-auth.conf` | `/etc/oidc-agent/` | 初回登録・再認証で oidc-gen に渡すオプション（`JLDG_GEN_OPTIONS`）と、クライアント JSON の既定のパス |
+| `jldg-client.json` | `/etc/oidc-agent/` | OP に登録した public client の情報 |
+| `issuer.config.d/jldg` | `/etc/oidc-agent/issuer.config.d/` | 更新された RT を保存するためのパスワード保持（`pw-store`）設定 |
+
+必要なコマンドは、引数なしと `--no-browser` では Bash 4.2 以降、`stty`、oidc-agent 5 系一式、`--token` では Bash と `oidc-token` である。配置と設定の手順は [ADMIN_GUIDE.md](ADMIN_GUIDE.md) を参照する。
+
+## 環境設定スクリプト
 
 ```bash
-source /usr/local/jldg/jldg-env.sh
+source /usr/local/jldg/jldg-env.sh    # Bash
 ```
-
-tcsh では次を読み込む。
 
 ```csh
-source /usr/local/jldg/jldg-env.csh
+source /usr/local/jldg/jldg-env.csh   # tcsh
 ```
 
-環境設定スクリプトは、認証補助スクリプトの配置ディレクトリを `PATH` に追加し、`JWT_USER_PATH` を `!jldg-token` に設定する。繰り返し読み込んでも同じディレクトリを重複追加しない。agent の起動・接続・認証やトークン取得は行わず、`OIDC_SOCK` 等の接続用変数も変更しない。
+配置先を `PATH` の先頭に追加し、`JWT_USER_PATH` を `!jldg-auth --token` に設定する。繰り返し source しても PATH は重複しない。agent の操作、認証、トークン取得は行わず、`OIDC_SOCK` 等も変更しない。配置先が `/usr/local/jldg` でない場合は、source の前に `JLDG_HELPER_DIR` をその絶対パスに設定する。
 
-標準以外の場所へ導入した場合は、読み込む前に `JLDG_HELPER_DIR` をその絶対パスに設定する。設定は現在のシェルと子プロセスに適用される。自動で設定したい場合は、利用者自身のシェル起動ファイルから読み込む。
+## agent との関係
 
-`JWT_USER_PATH` はトークン取得方法の指定であり、設定済みでも認証準備完了を意味しない。失敗・中断や agent の停止後も、この設定は残る。
-
-## agent の準備とアカウントの読み込み
-
-利用者本人として、使用するシェルに合う次の手順を実行する。初回の起動と、別端末・再ログイン後の再接続は同じ手順で行う。
-
-Bash：
+利用者は、ログインのたびに次で agent に接続する。agent が動いていなければ起動される。
 
 ```bash
-eval "$(oidc-keychain)"
-oidc-agent --status
+eval "$(oidc-keychain)"        # Bash
 ```
-
-tcsh：
 
 ```csh
-eval `bash -c 'eval "$(oidc-keychain)" >/dev/null; printf "setenv OIDC_SOCK %q;\n" "$OIDC_SOCK"'`
-oidc-agent --status
+eval `bash -c 'eval "$(oidc-keychain)" >/dev/null; printf "setenv OIDC_SOCK %q;\n" "$OIDC_SOCK"'`   # tcsh
 ```
 
-同じ利用者・同じホストの agent が起動済みなら再利用し、なければ新しく起動する。`eval` は接続先を現在のシェルに反映するために必要である。`oidc-agent --status` で接続と稼働設定を確認できる。
+oidc-keychain 5.3.6 の出力は Bash 形式なので、tcsh では一度 Bash で評価して `setenv` に変換する。内側の `>/dev/null` は、PID の表示が変換結果に混ざるのを防ぐ。停止は Bash では `eval "$(oidc-keychain --kill)"`、tcsh では `oidc-keychain --kill` の成功後に `unsetenv OIDC_SOCK OIDCD_PID OIDCD_PID_FILE` を実行する。
 
-5.3.6 の `oidc-keychain` は、`OIDC_SOCK=...; export OIDC_SOCK;` などの **Bash 形式の設定コマンド**を標準出力へ返す。別プロセスとして動くコマンドからは、呼び出し元のシェルの環境変数を直接変更できないため、Bash ではその出力を `eval` して現在のシェルに反映する。
+`oidc-keychain --accounts jldg` は使わない。5.3.6 は `oidc-prompt` が見つかると内部の oidc-add に GUI 入力を指定するため、接続（oidc-keychain）と読み込み（jldg-auth）を分けている（[公式実装](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/src/oidc-keychain/oidc-keychain)）。
 
-tcsh は変数の設定方法が異なり、Bash 形式の出力をそのまま解釈できない。そのため上の例では、一度 Bash で評価して接続先を取り出し、tcsh の `setenv OIDC_SOCK ...` というコマンドに変換してから、現在の tcsh で `eval` している。
+agent 自身の自動読み込み・自動生成・自動再認証は、管理者設定で無効にする（[ADMIN_GUIDE.md 3.3](ADMIN_GUIDE.md#33-etcoidc-agentconfig)）。そのため、アカウントの読み込みと再認証は、対話端末で実行する jldg-auth だけが行う。
 
-tcsh の例の内部の `>/dev/null` は PID が変換結果に混ざるのを防ぐために必要である。この例は標準の一時ディレクトリのソケットパスを前提とする。詳しい動作確認と制限は [管理者マニュアル](ADMIN_GUIDE.md#57-tcsh) を参照する。
+## jldg-auth の動作
 
-保存済みアカウントを新しい agent に読み込む場合は、接続したシェルで次を実行する。Bash・tcsh 共通である。
+### モード
 
-```bash
-oidc-add jldg
-```
+| 実行方法 | 呼び出し元 | 端末 | 動作 |
+| --- | --- | --- | --- |
+| `jldg-auth` | 利用者 | 必須 | 利用準備。必要な場合だけ初回登録・ブラウザ再認証を行う |
+| `jldg-auth --no-browser` | 利用者、シェル起動設定 | 必須 | 利用準備のうち、読み込みとトークン取得の確認だけを行う |
+| `jldg-auth --token` | Gfarm（`JWT_USER_PATH`） | 不要 | トークンを標準出力に返す |
+| `jldg-auth --help` | 利用者 | 不要 | 使い方を標準出力に表示する |
 
-必要に応じて暗号化パスワードを端末で入力する。正常な読み込み済みアカウントでは通常、再入力は不要である。管理者が [導入手順](ADMIN_QUICKSTART.md#3-設定する管理者) の設定を反映済みなら、CLI 入力とパスワードのメモリ保持は既定となり、`--pw-prompt=cli` と `--pw-store` は省略できる。未登録なら、先に「初回登録と再認証」節の `jldg-auth` を実行する。読み込み一覧は `oidc-add --loaded` で確認する。
+標準出力に書くのは `--token` のトークンと `--help` だけで、メッセージはすべて標準エラーに出す。source した場合は、何もせずにエラーを表示して終了する。
 
-本手順では `oidc-keychain --accounts jldg` を使わず、接続後に `oidc-add jldg` を実行する。5.3.6 の oidc-keychain は `oidc-prompt` が見つかると、内部の oidc-add に `--pw-prompt=gui` を付け、管理者の CLI 既定値を上書きするためである。以降の手動の oidc-add にまで影響する設定変更ではない。[5.3.6 の実装](https://github.com/indigo-dc/oidc-agent/blob/v5.3.6/src/oidc-keychain/oidc-keychain)
+### 利用準備（引数なし、`--no-browser`）
 
-## 再ログイン時の自動接続・読み込み（任意）
+1. 標準入力が端末でなければ終了する。必要なコマンドを確認し、端末設定を保存する。
+2. `oidc-agent --status` で agent に接続できなければ終了する。
+3. `oidc-gen --accounts` でアカウント `jldg` が保存されているかを確認する。一覧を取得できなければ終了する。
+4. 未登録の場合：
+   - `--no-browser` では、`jldg-auth` の実行を案内して終了状態1で終了する。
+   - 引数なしでは、`jldg-auth.conf` とクライアント JSON を読み、`oidc-gen --file=<JSON> jldg` で初回登録する（ブラウザ認証）。
+5. 登録済みの場合：`oidc-add jldg` で読み込み、`oidc-token --time=60 jldg` でトークンを取得できることを確認する。未読み込みのアカウントの読み込みでは、oidc-add が OP のメタデータ取得と RT による更新を行う。読み込み済みなら oidc-add は更新を省略し、トークン取得はキャッシュを再利用する。成功すれば完了。
+6. 手順5で、OP が RT を無効と明示した場合（次節）だけ、`jldg-auth.conf` を読んで `oidc-gen --reauthenticate jldg` で再認証する。`--no-browser` では再認証せず、`jldg-auth` の実行を案内して、元の終了状態で終了する。それ以外の失敗（通信障害、パスワード入力の失敗など）では再認証しない。
+7. 初回登録・再認証の後は、もう一度 `oidc-token --time=60 jldg` で取得を確認する。1回の実行の中で再認証を繰り返すことはない。
+8. 取得を確認できた場合だけ `JLDG is ready.` を表示する。トークン本体は表示しない。
 
-初回登録後、毎回の手入力を省きたい利用者は、次を `~/.bashrc` に追加できる。自動設定は必須ではない。
+`jldg-auth.conf` とクライアント JSON は、ブラウザ認証に進む場合だけ読む（再認証ではクライアント JSON も不要）。クライアント JSON の構文は検査しない。`jldg-auth.conf` が `JLDG_GEN_OPTIONS` を空でない配列として定義していなければ、ブラウザ認証を始めずに終了する。
 
-```bash
-if [[ $- == *i* && -t 0 ]]; then
-    source /usr/local/jldg/jldg-env.sh
-    eval "$(oidc-keychain)" >/dev/null
-    if oidc-agent --status >/dev/null; then
-        oidc-add jldg
-    else
-        printf '%s\n' 'JLDG: Could not connect to oidc-agent. Run oidc-agent --status and retry the connection steps.' >&2
-    fi
-fi
-```
+`JLDG is ready.` は、その時点でアクセストークンを取得できたことを示す。毎回の強制更新は行わないため、RT の現在・将来の有効性までは保証しない。
 
-対話端末を開くたびに接続し、必要なら保存済みアカウントを読み込む。この自動実行例では、毎回の PID と正常時の状態表示を抑えるため `>/dev/null` を付けている。標準エラーは表示し、接続確認に失敗した場合は復旧案内を出してアカウントを読み込まない。新しい agent への読み込みでは暗号化パスワードを求められる場合がある。再認証が必要なら `jldg-auth` を手動実行する。
+同じアカウントの初回登録・ブラウザ再認証を、複数の端末から同時に実行することは想定していない（排他制御はしない）。競合すると、認証処理や設定の保存が失敗し、やり直しが必要になる場合がある。
 
-これはシェル起動時の明示的な oidc-add 実行であり、トークン要求時の自動読み込みを止める `autoload: false` はそのままでよい。
+### Gfarm 向けのトークン取得（`--token`）
 
-Bash のログインシェルでは `~/.bash_profile` 等から `~/.bashrc` が読み込まれることを確認する。読み込まれない構成では、このブロックをログイン時の起動ファイルに置く。複数箇所へ重複して追加しない。tcsh の `~/.tcshrc` 用の例は [管理者マニュアル](ADMIN_GUIDE.md#57-tcsh) を参照する。シェル起動ファイルは本ツールが自動編集することはない。
+`oidc-token --time=60 jldg` を一度だけ呼び、成功時だけトークンを標準出力へ返す。失敗時は、部分的な標準出力を捨て、元の終了状態を保って非0で終了する。標準入力は消費しない。管理者設定を読まず、読み込み・初回登録・ブラウザ再認証・自動リトライは行わない。
 
-## 初回登録と再認証
+`--time=60` は、アクセストークンの残り有効時間として60秒以上を求める指定である。条件を満たすキャッシュがあれば OP に問い合わせずに返し、なければ agent が RT で更新する。JLDG の RT は発行から1か月有効で、更新のたびに、そこから1か月有効な新しい RT に置き換わる。キャッシュを返すだけでは RT は更新されない。RT による更新を実際に試す方法は [ADMIN_GUIDE.md 5.4](ADMIN_GUIDE.md#54-保存済みアカウントの読み込みと更新確認) を参照する。
 
-agent に接続できる端末で、次を直接実行する。Bash・tcsh のどちらからも同じコマンドを使う。`eval` や `source` は付けない。
+### エラーの判定と表示
 
-初回登録が必要な場合も、リフレッシュトークンが失効して再認証が必要と案内された場合も、次を使う。
+oidc-agent のコマンドの標準エラーは、1文字ずつ端末へ転送する。そのため、改行のないパスワード入力の案内もすぐに表示される。OP のエラー本文はそのまま残す。
 
-```bash
-jldg-auth
-```
+- **RT の拒否：** `Error:` で始まる行が、`invalid_grant` または `invalid_token` と `refresh token` を含む場合、または `no refresh token` を含む場合に、RT が無効と判定する（大文字・小文字は区別しない）。失敗一般や、`--reauthenticate` という語を含むだけの診断を、期限切れとは判定しない。
+- **標準の再認証案内の置き換え：** RT の拒否時に oidc-agent が表示する `oidc-gen jldg --reauthenticate` の案内を直接実行すると、SSH 転送・SOCKS5 プロキシの案内が出ない。そのため、既知の案内の行は表示せず、jldg-auth の案内に置き換える。
+- **IPC の切断：** `Error:` で始まる行が `the other party disconnected` を含む場合は、agent との通信の切断と判定する。jldg-auth は agent への接続を再確認して案内を分ける。OP の停止・パスワード誤り・失効とは断定せず、再認証・agent の再起動・自動リトライは行わない。
+- **oidc-gen の状態検索の案内：** jldg-auth は `oidc-gen --state=...` による手動の状態検索に対応しないため、その案内は表示せず、jldg-auth の再実行を案内する。
+- **転送の案内：** oidc-gen が出力した認証 URL の `redirect_uri` から `http://localhost:ポート` を読み取り、SSH 転送とブラウザ設定の案内を表示する。パーセントエンコードされた localhost の URI だけに対応する。
 
-`oidc-gen --accounts` で保存済みの `jldg` アカウントを調べ、未登録なら初回登録、登録済みなら再認証を行う。一覧の取得に失敗した場合は処理を中止する。これは保存済み設定の有無の判定であり、agent への読み込み状態やトークンの有効性は判定しない。登録済みで実行すると、有効なアカウントでも再認証へ進む。単に未読み込みの場合は上記の `oidc-add` を使う。
+終了状態0のコマンドがエラーの診断を出した場合は、成功とみなさない。
 
-初回登録の値は管理者が `/etc/oidc-agent/jldg-client.json` に、oidc-gen の共通オプションは `/etc/oidc-agent/jldg-auth.conf` に設定する。前者の標準配置先は `JLDG_CLIENT_CONFIG`、後者は `JLDG_AUTH_CONFIG` で変更できる。再認証は保存済みアカウントを使うため、クライアント JSON の読み取りは不要である。
+### 主なメッセージ
 
-パスワード・ブラウザ認証が必要なら端末上で案内する。`jldg-auth` はアカウントの通常の読み込みやトークン取得確認を行わない。登録・再認証の成功は対応する完了表示と終了状態0で確認する。
+| メッセージ | 意味 |
+| --- | --- |
+| `JLDG is ready.` | 利用準備が完了した |
+| `JLDG account registration completed.` / `JLDG reauthentication completed.` | 初回登録・再認証が完了した（続けて取得を確認する） |
+| `The refresh token was rejected. Starting JLDG browser reauthentication.` | RT の拒否を検出し、再認証を始める |
+| `Browser authentication:` で始まる案内 | SSH 転送とブラウザ設定の案内 |
+| `JLDG account is not registered. Run in a terminal: jldg-auth` | `--no-browser` で未登録だった |
+| `JLDG reauthentication is required. Run in a terminal: jldg-auth` | RT の拒否を検出したが、このモードでは再認証しない |
+| `JLDG account registration did not complete.` / `JLDG reauthentication did not complete.` | oidc-gen が失敗した。jldg-auth の再実行を案内する |
+| `Cannot connect to oidc-agent. Run oidc-keychain to start or reconnect the agent, then retry jldg-auth.` | agent に接続できない |
+| `JLDG: Communication with oidc-agent was interrupted; ...` | IPC の切断。続く行で、agent に接続できるかに応じた案内を出す |
+| `JLDG operation failed. Check the original error above.` | そのほかの失敗 |
+| `JLDG token retrieval failed.` | `--token` での失敗（続けて上記のいずれかの案内を出す） |
+| `Cannot read administrator configuration: ...` / `Cannot read client configuration: ...` / `JLDG_GEN_OPTIONS is not set as an array in ...` | 管理者設定の不備 |
+| `Run jldg-auth in an interactive terminal. ...` | 端末のない環境で利用準備を実行した |
+
+### 端末設定と中断
+
+利用準備では、パスワード入力の前に端末設定を保存し、成功・失敗・Ctrl-C（INT）・TERM・HUP のいずれでも元に戻す。SIGKILL は対象外である。失敗や中断の後も、agent・アカウント・環境変数はそのまま残し、停止・削除・アンロードはしない。ファイルを作る場合に備えて、umask を 077 にする。
 
 ## ブラウザ認証と転送
 
-手元の PC で、**JLDG の証明書が設定されたブラウザ**を使う。`jldg-auth` を実行した端末は認証待ちのままにする。
-
-手元の PC で新しい端末を開き、表示されたオプションを普段の SSH コマンドの接続先より前に追加して転送を準備する。
-
-例えばコールバック用ポートが `4243` の場合、手元の PC で次を実行する。
+認証基盤への接続元は、JLDG クライアントが属するネットワークに制限されている。利用者は手元の PC から実行ホストへ、次の転送を付けて SSH 接続する（ポート4243の例）。
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 4243:localhost:4243 -D 1080 YOUR_SSH_HOST_ALIAS
 ```
 
-接続先を実際の実行ホストに置き換え、普段必要なユーザー名・鍵・踏み台等も指定する。`-L` のポートは表示に合わせる。`-L` は localhost コールバック用、`-D 1080` は OP に実行ホスト経由で接続するための SOCKS5 プロキシ用である。PC 側の両ポートが空いている必要がある。ブラウザの SOCKS5 プロキシを `localhost:1080` に設定し、SSH を維持したまま認証 URL を開く。
+`-D 1080` は、ブラウザから OP への通信（SOCKS5 プロキシ `localhost:1080`）を実行ホスト経由にする。`-L` は、localhost コールバックで返される認証コードを実行ホストの agent へ届ける。SSH の転送とブラウザの設定は、jldg-auth は行わない。
 
-`Please press Enter to try it again.` と表示されても準備中は押さず、**ブラウザ認証を完了してから元の端末で Enter を押す**。Enter は最後の1回の照会を行う操作である。OP 側の認証セッションが失効していたら、`jldg-auth` をやり直す。
+## シェル起動時の自動準備
 
-初回登録では、ブラウザ認証後に元の端末の案内に従って保存用の暗号化パスワードを設定する。再認証では、URL が表示される前に保存済みアカウントの暗号化パスワードを求められる場合がある。初回登録なら `JLDG account registration completed.`、再認証なら `JLDG reauthentication completed.` の表示と終了状態0を確認する。
-
-元の端末の処理が完了したら、ブラウザのプロキシ設定を元に戻し、転送端末を Ctrl-C で終了する。`jldg-auth` は SSH 接続の作成やブラウザ設定を自動では行わない。
-
-## Gfarm のトークン取得と失敗時の操作
-
-Gfarm は `JWT_USER_PATH` の指定により `jldg-token` を実行する。このスクリプトは `oidc-token --time=60 jldg` を一度呼ぶ。標準出力は成功時のトークンだけとし、失敗時は元のエラーと復旧方法を標準エラーへ表示して非0終了する。アプリケーションの標準入力は消費しない。
-
-復旧方法は、状況に応じて利用者が端末で選ぶ。
-
-| 状況 | 操作 |
-|---|---|
-| agent に接続できない | `oidc-keychain` で起動・再接続する（上記のシェル別手順） |
-| 保存済みアカウントが未読み込み | `oidc-add jldg` |
-| 初回登録・再認証が必要 | `jldg-auth` |
-| OP への通信障害 | 通信を復旧してから再試行する |
-
-復旧後に元の Gfarm コマンドを再実行する。`jldg-token` はエラー文から原因を決めつけず、起動・読み込み・登録・再認証・リトライを自動実行しない。バッチ実行でもブラウザ認証を開始しない運用のため、管理者は agent の自動読み込み・自動生成・自動再認証を無効にする。起動済み agent の設定は別途確認する。
-
-有効なキャッシュがあればそのトークンを返し、更新が必要でリフレッシュトークンが有効なら agent が通常の更新を行う。`--time=60` は残存有効時間の要求であり、トークンの寿命を60秒に設定するものではない。
-
-JLDG のリフレッシュトークンは発行から1か月有効である。アクセストークンの更新に成功すると、新しいリフレッシュトークンが発行され、その時点から再び1か月有効になる。保存済みのアクセストークンを使うだけでは期限は延びず、更新が行われないまま1か月が経過すると期限が切れ、ブラウザでの再認証が必要になる。アクセストークンの更新は、期限が切れる前に行われることもある。
-
-個々のリフレッシュトークンの有効期限日時は、通常の利用手順では表示されない。`oidc-token --expires-at` が表示するのはアクセストークンの期限である。リフレッシュトークンが期限切れ・失効になっても、有効なキャッシュがあればトークン取得は成功し得る。
-
-トークンを画面に表示しない確認方法：
-
-```bash
-jldg-token >/dev/null
-```
-
-キャッシュを使わずに更新できるかを確認する場合は、agent に接続し、アカウント `jldg` を読み込み済みの端末で次を実行する。Bash・tcsh 共通である。
-
-```bash
-oidc-token --force-new jldg >/dev/null
-```
-
-これは認証基盤に新しいアクセストークンを要求し、読み込み済みのリフレッシュトークンで実際に更新を試みる操作である。成功はその時点で更新できることを示し、将来の有効期限日時を確認するものではない。通信障害、agent への未接続やアカウントの未読み込みでも失敗するため、失敗だけで期限切れとは断定しない。認証基盤からリフレッシュトークンが無効との応答がある場合は、`jldg-auth` で再認証する。
-
-## 中断・停止・再ログイン
-
-- `jldg-auth` はパスワード入力前の端末設定を保存し、成功・失敗・Ctrl-C 等による終了時に復元する。SIGKILL では復元できない。
-- 登録・再認証を中断しても、agent やアカウントは自動で停止・削除・アンロードしない。環境変数も変更しない。認証失敗時は原因を解消してから明示的に再実行する。
-- agent の停止は次の手順で行う。同じ利用者の他端末・他アカウントにも影響する。停止は発行済みトークンの取り消しではない。Bash では、出力された削除コマンドも現在のシェルで実行する。
-
-  ```bash
-  eval "$(oidc-keychain --kill)"
-  ```
-
-  停止時の出力も Bash 形式の `unset` コマンドである。tcsh では環境変数の削除に `unsetenv` を使うため、出力を直接 eval せず、停止成功後に次のように解除する。
-
-  ```csh
-  oidc-keychain --kill
-  if ( $status == 0 ) then
-      unsetenv OIDC_SOCK OIDCD_PID OIDCD_PID_FILE
-  endif
-  ```
-
-  `JWT_USER_PATH` と、他端末の接続用変数は残る。再開時は上記と同じ `oidc-keychain` の接続手順を実行し、`oidc-add jldg` で読み込む。保存済みアカウントの再登録は不要である。停止の終了状態も確認する手順は [管理者マニュアル](ADMIN_GUIDE.md#55-停止と再読み込み) を参照する。
-- ログアウトだけでは agent が残る場合がある。再ログイン後は上記の手順を手動または任意の起動設定で実行する。agent が残っていれば読み込み済みアカウントも再利用でき、新しく起動した場合は保存済みアカウントを読み込む。
-- 同じアカウントの同時登録・同時再認証や、ホームを共有する複数ホスト間の競合は認証補助スクリプトが制御しない。
-- クライアント JSON は管理者が正しく設定済みであることを前提とし、`jldg-auth` は読み取り可否だけ確認する。初回登録で平文のクライアント JSON を読み込む際に復号パスワードを要求された場合は、構文や文字コードの不備により暗号化ファイルと誤認されている可能性があるため、管理者が JSON を確認する。
-
-## ファイル構成
-
-| ファイル | 役割 |
-|---|---|
-| `jldg-auth` | 初回登録・再認証、転送案内、端末復元 |
-| `jldg-token` | Gfarm 用のトークン取得と失敗時の操作案内 |
-| `jldg-env.sh` / `jldg-env.csh` | 利用者が読み込む環境設定 |
-| `jldg-auth.conf` | 管理者が指定する oidc-gen のオプション |
-| `jldg-client.json` | 管理者が設定する public client 情報 |
-| `issuer.config.d/jldg` | 暗号化パスワードのメモリ保持設定 |
+利用者が任意でシェル起動ファイルに追加できる設定例を、[USER_GUIDE.md](USER_GUIDE.md) の8節と [ADMIN_GUIDE.md](ADMIN_GUIDE.md) の5.6節・5.7節に示している。対話端末だけで接続と `jldg-auth --no-browser` を実行し、ブラウザ認証は始めない。jldg-auth 自身はシェルの起動ファイルを編集しない。
