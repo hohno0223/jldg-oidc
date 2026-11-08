@@ -15,5 +15,5 @@ end
 if ( $_jldg_path_found == 0 ) then
     set path = ( "$_jldg_helper_dir" $path:q )
 endif
-setenv JWT_USER_PATH \!jldg-token
+setenv JWT_USER_PATH "\!jldg-auth --token"
 unset _jldg_helper_dir _jldg_path_found _jldg_path_entry

@@ -6,6 +6,6 @@ case :${PATH-}: in
     *) PATH=$_jldg_helper_dir${PATH:+:$PATH} ;;
 esac
 export PATH
-JWT_USER_PATH='!jldg-token'
+JWT_USER_PATH='!jldg-auth --token'
 export JWT_USER_PATH
 unset _jldg_helper_dir

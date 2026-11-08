@@ -1,43 +1,290 @@
 #!/usr/bin/env bash
-# Run directly from Bash or tcsh; this command never emits shell commands.
+# jldg-auth: JLDG token authentication helper for oidc-agent.
+#
+#   jldg-auth               Prepare the account in a terminal. Register or
+#                           reauthenticate in a browser only when needed.
+#   jldg-auth --no-browser  Prepare without starting browser authentication.
+#   jldg-auth --token       Print an access token for Gfarm (JWT_USER_PATH).
+#
+# Run it directly from Bash or tcsh; do not source it. Only --token writes to
+# stdout, and that output is the token. All messages go to stderr.
+# The agent itself is started, reconnected and stopped by the user with
+# oidc-keychain; this helper never starts, stops or reconfigures the agent and
+# never changes the caller's environment.
+#
+# Compatible with Bash 4.2 or later.
+
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
     printf '%s\n' 'Run jldg-auth directly; do not source it.' >&2
     return 2
 fi
 
-terminal_state=''
-restore_terminal() {
-    local rc=$?
-    if [[ -n $terminal_state ]]; then
-        stty "$terminal_state" || printf '%s\n' 'Could not restore terminal settings; run stty echo.' >&2
-    fi
-    return "$rc"
-}
-trap restore_terminal EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-umask 077
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-show_gen_output() {
-    local char line='' port
-    # Only the localhost redirect URIs configured for JLDG are supported.
-    local pattern='[?&]redirect_uri=http%3[Aa]%2[Ff]%2[Ff]localhost%3[Aa]([0-9]+)(&|[[:space:]]|$)'
-    # One writer emits both the original text and guidance. Forward prompts
-    # immediately, but insert guidance only after a complete URL line.
+ACCOUNT=jldg
+DEFAULT_AUTH_CONFIG=/etc/oidc-agent/jldg-auth.conf
+# Minimum remaining access-token lifetime requested from oidc-token.
+TOKEN_MIN_LIFETIME=60
+USAGE='Usage: jldg-auth [--no-browser | --token]'
+RECONNECT_HINT='Run oidc-keychain to start or reconnect the agent, then retry jldg-auth.'
+
+# Diagnosis of a command's error output (see filter_diagnostics).
+DIAG_NONE=0
+DIAG_RT_REJECTED=10   # the OP explicitly rejected the refresh token
+DIAG_DISCONNECTED=20  # IPC with oidc-agent was interrupted
+
+# Native hint printed by oidc-agent after a refresh-token rejection. It tells
+# the user to run oidc-gen directly, which would skip the SSH forwarding
+# guidance, so these lines are hidden and replaced with jldg-auth guidance.
+REAUTH_HINT_LINES=(
+    'Most likely the refresh token expired. To create a new one, just run:'
+    "\$ oidc-gen $ACCOUNT --reauthenticate"
+    "\$ oidc-gen --reauthenticate $ACCOUNT"
+    "oidc-gen $ACCOUNT --reauthenticate"
+    "oidc-gen --reauthenticate $ACCOUNT"
+)
+
+# oidc-gen hint for a manual state lookup, which jldg-auth does not support.
+STATE_HINT_HEADER='Please try state lookup again by using:'
+STATE_HINT_COMMAND='oidc-gen --state='
+
+# Informational oidc-gen stdout lines that are not useful to JLDG users.
+GEN_NOISE_LINES=(
+    'No account exists with this short name. Creating new configuration ...'
+    'Generating account configuration ...'
+    'accepted'
+)
+
+# Only the localhost redirect URIs registered for JLDG are recognized.
+REDIRECT_PORT_PATTERN='[?&]redirect_uri=http%3[Aa]%2[Ff]%2[Ff]localhost%3[Aa]([0-9]+)(&|[[:space:]]|$)'
+
+# ---------------------------------------------------------------------------
+# Results of the last run_checked call (global by design)
+# ---------------------------------------------------------------------------
+
+backend_rc=0              # exit status of the command
+backend_output=''         # its stdout, without trailing newlines
+diagnostic_rc=$DIAG_NONE  # DIAG_* classification of its stderr
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+msg() {
+    printf '%s\n' "$@" >&2
+}
+
+# trim_into VAR TEXT: strip surrounding blanks and a trailing CR.
+trim_into() {
+    local text=$2
+    text=${text#"${text%%[!$' \t']*}"}
+    text=${text%$'\r'}
+    text=${text%"${text##*[!$' \t']}"}
+    printf -v "$1" '%s' "$text"
+}
+
+# in_list TEXT ITEM...: TEXT equals one of the items.
+in_list() {
+    local text=$1 item
+    shift
+    for item; do
+        [[ $text == "$item" ]] && return 0
+    done
+    return 1
+}
+
+# prefix_of_list TEXT ITEM...: TEXT is the beginning of one of the items.
+prefix_of_list() {
+    local text=$1 item
+    shift
+    for item; do
+        [[ $item == "$text"* ]] && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Running oidc-agent commands
+# ---------------------------------------------------------------------------
+
+# Copy diagnostics to stdout, hiding the native reauthentication hint.
+# Text is forwarded character by character so that prompts without a newline
+# (such as password prompts) appear immediately. A line is held back only
+# while it may still turn out to be a hint line.
+# Returns DIAG_DISCONNECTED or DIAG_RT_REJECTED when an "Error:" line says so;
+# the original error text is always kept.
+filter_diagnostics() {
+    local char line='' trimmed lower terminator streaming=0
+    local rejected=0 disconnected=0
+    while :; do
+        if IFS= read -r -N 1 char; then
+            if [[ $char != $'\n' ]]; then
+                line+=$char
+                if ((streaming)); then
+                    printf '%s' "$char"
+                else
+                    trim_into trimmed "$line"
+                    if ! prefix_of_list "$trimmed" "${REAUTH_HINT_LINES[@]}"; then
+                        printf '%s' "$line"
+                        streaming=1
+                    fi
+                fi
+                continue
+            fi
+            terminator=$'\n'
+        else
+            # End of input; a final line without a newline is handled the same way.
+            [[ -n $line ]] || break
+            terminator=''
+        fi
+
+        trim_into trimmed "$line"
+        if ((streaming)); then
+            printf '%s' "$terminator"
+        elif ! in_list "$trimmed" "${REAUTH_HINT_LINES[@]}"; then
+            printf '%s%s' "$line" "$terminator"
+        fi
+        # A hidden hint line is dropped together with its newline.
+
+        lower=${trimmed,,}
+        if [[ $lower == error:* ]]; then
+            case $lower in
+                *invalid_grant*'refresh token'*|*invalid_token*'refresh token'*|*'no refresh token'*)
+                    rejected=1 ;;
+            esac
+            [[ $lower != *'the other party disconnected'* ]] || disconnected=1
+        fi
+
+        [[ -n $terminator ]] || break
+        line='' streaming=0
+    done
+    ((!disconnected)) || return "$DIAG_DISCONNECTED"
+    ((!rejected)) || return "$DIAG_RT_REJECTED"
+    return "$DIAG_NONE"
+}
+
+# run_checked COMMAND...: run an oidc-agent command and set backend_rc,
+# backend_output and diagnostic_rc. stderr (including prompts) is streamed to
+# the terminal through filter_diagnostics; stdout is captured separately.
+# Both pipeline statuses leave the command substitution on a private final
+# line, which is removed before any token can be returned to Gfarm.
+run_checked() {
+    local packet
+    packet=$(
+        {
+            OIDC_AGENT_NOCOLOR=1 "$@" 2>&1 >&3 | filter_diagnostics >&2
+            printf '\n%d %d' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}" >&3
+        } 3>&1
+    )
+    read -r backend_rc diagnostic_rc <<<"${packet##*$'\n'}"
+    backend_output=${packet%$'\n'*}
+    while [[ $backend_output == *$'\n' ]]; do
+        backend_output=${backend_output%$'\n'}
+    done
+    if ((backend_rc == 0 && diagnostic_rc != DIAG_NONE)); then
+        # An error diagnostic contradicting a zero exit status is not success.
+        backend_rc=1
+    fi
+    return "$backend_rc"
+}
+
+# Get a token through the agent cache or a normal refresh.
+# The token is left in backend_output and is never printed here.
+check_token() {
+    run_checked oidc-token --time="$TOKEN_MIN_LIFETIME" "$ACCOUNT" </dev/null || return
+    if [[ -z $backend_output ]]; then
+        msg 'oidc-token returned no token.'
+        return 1
+    fi
+}
+
+# Explain the next step after a failed load or token retrieval.
+failure_guidance() {
+    case $diagnostic_rc in
+        "$DIAG_DISCONNECTED")
+            msg 'JLDG: Communication with oidc-agent was interrupted; the operation did not complete.'
+            if oidc-agent --status >/dev/null 2>&1; then
+                msg '  The agent is reachable now. Check OP availability and network connectivity, then retry jldg-auth.'
+            else
+                msg "  Cannot connect to oidc-agent. $RECONNECT_HINT"
+            fi
+            msg '  This error does not establish that the password or refresh token is invalid.'
+            ;;
+        "$DIAG_RT_REJECTED")
+            msg 'JLDG reauthentication is required. Run in a terminal: jldg-auth'
+            ;;
+        *)
+            msg 'JLDG operation failed. Check the original error above.' \
+                '  Check the agent connection and OP/network availability, then retry jldg-auth in a terminal.'
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Browser authentication with oidc-gen (registration and reauthentication)
+# ---------------------------------------------------------------------------
+
+# Read the administrator's oidc-gen options. Needed only for browser auth.
+load_auth_config() {
+    local auth_config=${JLDG_AUTH_CONFIG:-$DEFAULT_AUTH_CONFIG}
+    if [[ ! -r $auth_config ]]; then
+        msg "Cannot read administrator configuration: $auth_config"
+        return 1
+    fi
+    unset JLDG_GEN_OPTIONS
+    # Trusted, root-owned Bash file that sets JLDG_GEN_OPTIONS (an array)
+    # and the default JLDG_CLIENT_CONFIG.
+    source "$auth_config"
+    if [[ $(declare -p JLDG_GEN_OPTIONS 2>/dev/null) != 'declare -a'* ]] ||
+        ((${#JLDG_GEN_OPTIONS[@]} == 0)); then
+        msg "JLDG_GEN_OPTIONS is not set as an array in $auth_config."
+        return 1
+    fi
+}
+
+# Drop informational oidc-gen stdout lines.
+filter_gen_stdout() {
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        in_list "$line" "${GEN_NOISE_LINES[@]}" || printf '%s\n' "$line"
+    done
+}
+
+# Hide the manual state-lookup hint. Other text is forwarded as soon as it
+# cannot be part of the hint, so prompts appear without waiting for a newline.
+filter_gen_output() {
+    local char pending='' streaming=0 suppress=0
     while IFS= read -r -N 1 char; do
-        printf '%s' "$char"
-        if [[ $char != $'\n' ]]; then
-            line+=$char
+        if [[ $char == $'\n' ]]; then
+            if ((!suppress)) && [[ $pending != "$STATE_HINT_HEADER" ]]; then
+                printf '%s\n' "$pending"
+            fi
+            pending='' streaming=0 suppress=0
+        elif ((suppress)); then
             continue
+        elif ((streaming)); then
+            printf '%s' "$char"
+        else
+            pending+=$char
+            if [[ $pending == "$STATE_HINT_COMMAND" ]]; then
+                suppress=1 pending=''
+            elif ! prefix_of_list "$pending" "$STATE_HINT_HEADER" "$STATE_HINT_COMMAND"; then
+                printf '%s' "$pending"
+                pending='' streaming=1
+            fi
         fi
-        port=''
-        if [[ $line =~ $pattern ]]; then
-            port=${BASH_REMATCH[1]}
-        fi
-        line=''
-        [[ -n $port ]] || continue
-        printf '\nBrowser authentication:
+    done
+    if ((!suppress)) && [[ $pending != "$STATE_HINT_HEADER" ]]; then
+        printf '%s' "$pending"
+    fi
+    return 0
+}
+
+print_forwarding_guidance() {
+    local port=$1
+    printf '\nBrowser authentication:
   Use a browser on your PC with the JLDG certificate installed.
   In another terminal on your PC, add these options before the destination
   in your usual SSH command to the machine running oidc-agent:
@@ -52,117 +299,194 @@ show_gen_output() {
 If polling stops and asks for Enter, complete browser authentication first,
 then press Enter in this terminal. Keep SSH connected while it waits.
 ' "$port" "$port"
+}
+
+# Forward oidc-gen output and add SSH forwarding guidance after each complete
+# line that contains the authorization URL.
+show_gen_output() {
+    local char line=''
+    while IFS= read -r -N 1 char; do
+        printf '%s' "$char"
+        if [[ $char != $'\n' ]]; then
+            line+=$char
+        else
+            if [[ $line =~ $REDIRECT_PORT_PATTERN ]]; then
+                print_forwarding_guidance "${BASH_REMATCH[1]}"
+            fi
+            line=''
+        fi
     done >&2
 }
 
-filter_gen_stdout() {
-    local line
-    while IFS= read -r line || [[ -n $line ]]; do
-        case $line in
-            'No account exists with this short name. Creating new configuration ...'|\
-            'Generating account configuration ...'|accepted) ;;
-            *) printf '%s\n' "$line" ;;
-        esac
-    done
-}
-
-filter_gen_output() {
-    local char pending='' passthrough=0 suppress=0
-    local header='Please try state lookup again by using:'
-    local command='oidc-gen --state='
-    # Forward ordinary text as soon as it differs from the two hidden lines.
-    # In particular, do not wait for a newline before displaying a prompt.
-    while IFS= read -r -N 1 char; do
-        if [[ $char == $'\n' ]]; then
-            if (( !suppress )) && [[ $pending != "$header" ]]; then
-                printf '%s\n' "$pending"
-            fi
-            pending='' passthrough=0 suppress=0
-        elif ((suppress)); then
-            continue
-        elif ((passthrough)); then
-            printf '%s' "$char"
-        else
-            pending+=$char
-            if [[ $pending == "$command" ]]; then
-                suppress=1
-                pending=''
-            elif [[ $header != "$pending"* && $command != "$pending"* ]]; then
-                printf '%s' "$pending"
-                pending='' passthrough=1
-            fi
-        fi
-    done
-    if (( !suppress )) && [[ $pending != "$header" ]]; then
-        printf '%s' "$pending"
-    fi
-    return 0
-}
-
+# run_gen ARG...: run oidc-gen with the administrator options.
+# stdout is filtered first; the merged stream then passes through one writer
+# so that the forwarding guidance cannot interrupt another line.
 run_gen() {
     (
         set -o pipefail
-        # Filter stdout first, then serialize the display of the merged stream
-        # and forwarding guidance so they cannot interrupt each other's lines.
         OIDC_AGENT_NOCOLOR=1 oidc-gen "${JLDG_GEN_OPTIONS[@]}" "$@" \
             2>&1 > >(filter_gen_stdout) |
             filter_gen_output | show_gen_output
     )
 }
 
-main() {
-    local cmd accounts account registered=0
-    local auth_config=${JLDG_AUTH_CONFIG:-/etc/oidc-agent/jldg-auth.conf}
-    if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
-        printf '%s\n' 'Usage: jldg-auth' \
-            'Register jldg if no saved account exists; otherwise reauthenticate it.'
+gen_failure_guidance() {
+    msg "JLDG $1 did not complete. Check the error above, then run jldg-auth again." \
+        '  If it waited for Enter, complete browser authentication before pressing Enter.'
+}
+
+register_account() {
+    load_auth_config || return 1
+    if [[ ! -r $JLDG_CLIENT_CONFIG ]]; then
+        msg "Cannot read client configuration: $JLDG_CLIENT_CONFIG"
+        return 1
+    fi
+    if ! run_gen --file="$JLDG_CLIENT_CONFIG" "$ACCOUNT"; then
+        gen_failure_guidance 'account registration'
+        return 1
+    fi
+    msg 'JLDG account registration completed.'
+}
+
+reauthenticate_account() {
+    load_auth_config || return 1
+    msg 'The refresh token was rejected. Starting JLDG browser reauthentication.'
+    if ! run_gen --reauthenticate "$ACCOUNT"; then
+        gen_failure_guidance 'reauthentication'
+        return 1
+    fi
+    msg 'JLDG reauthentication completed.'
+}
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+
+# --token: called by Gfarm. Never reads administrator settings, loads
+# accounts, runs oidc-gen or consumes the caller's stdin.
+token_mode() {
+    local rc
+    check_token
+    rc=$?
+    if ((rc == 0)); then
+        printf '%s\n' "$backend_output"
         return 0
     fi
-    if [[ $# != 0 ]]; then
-        printf '%s\n' 'Usage: jldg-auth' >&2
-        return 2
+    msg 'JLDG token retrieval failed.'
+    failure_guidance
+    return "$rc"
+}
+
+terminal_state=''
+restore_terminal() {
+    local rc=$?
+    if [[ -n $terminal_state ]]; then
+        stty "$terminal_state" || msg 'Could not restore terminal settings; run stty echo.'
     fi
-    for cmd in oidc-agent oidc-gen stty; do
-        command -v "$cmd" >/dev/null || {
-            printf 'Required command not found: %s\n' "$cmd" >&2
-            return 1
-        }
-    done
-    [[ -r $auth_config ]] || {
-        printf 'Cannot read administrator configuration: %s\n' "$auth_config" >&2
-        return 1
-    }
-    # Trusted, administrator-managed Bash settings, including an options array.
-    source "$auth_config" || return 1
-    if ! oidc-agent --status >/dev/null; then
-        printf '%s\n' 'Cannot connect to oidc-agent. Start or reconnect to your agent, then retry.' >&2
-        return 1
-    fi
-    # Saved configurations determine registration, independently of loaded accounts.
-    if ! accounts=$(oidc-gen --accounts); then
-        printf '%s\n' 'Could not list saved accounts; authentication was not started.' >&2
-        return 1
-    fi
+    return "$rc"
+}
+
+# Restore the terminal (echo may be off during a password prompt) on any exit
+# except SIGKILL.
+protect_terminal() {
+    terminal_state=$(stty -g) || return 1
+    trap restore_terminal EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+}
+
+# Returns 0 if the account is saved, 1 if not, 2 if the list is unavailable.
+find_saved_account() {
+    local accounts account
+    accounts=$(oidc-gen --accounts) || return 2
     while IFS= read -r account; do
-        if [[ $account == jldg ]]; then
-            registered=1
-            break
-        fi
+        [[ $account == "$ACCOUNT" ]] && return 0
     done <<<"$accounts"
-    if [[ -t 0 ]]; then
-        terminal_state=$(stty -g) || return 1
+    return 1
+}
+
+# Load a saved account (a new load refreshes; a loaded account is reused),
+# then confirm that a token can be obtained without forcing a refresh.
+load_account() {
+    run_checked oidc-add "$ACCOUNT" || return
+    check_token
+}
+
+# prepare_mode ALLOW_BROWSER: interactive preparation (no argument or
+# --no-browser). Browser authentication happens only when ALLOW_BROWSER is 1
+# and the account is unregistered or its refresh token was rejected.
+prepare_mode() {
+    local allow_browser=$1 cmd rc
+    if [[ ! -t 0 ]]; then
+        msg 'Run jldg-auth in an interactive terminal. Account loading may require a password.'
+        return 1
     fi
-    if (( !registered )); then
-        [[ -r $JLDG_CLIENT_CONFIG ]] || {
-            printf 'Cannot read client configuration: %s\n' "$JLDG_CLIENT_CONFIG" >&2
+    for cmd in oidc-agent oidc-gen oidc-add oidc-token stty; do
+        if ! command -v "$cmd" >/dev/null; then
+            msg "Required command not found: $cmd"
             return 1
-        }
-        run_gen --file="$JLDG_CLIENT_CONFIG" jldg || return 1
-        printf '%s\n' 'JLDG account registration completed.' >&2
-    else
-        run_gen --reauthenticate jldg || return 1
-        printf '%s\n' 'JLDG reauthentication completed.' >&2
+        fi
+    done
+    umask 077
+    protect_terminal || return 1
+    if ! oidc-agent --status >/dev/null; then
+        msg "Cannot connect to oidc-agent. $RECONNECT_HINT"
+        return 1
     fi
+
+    find_saved_account
+    rc=$?
+    if ((rc == 2)); then
+        msg 'Could not list saved accounts; authentication was not started.'
+        return 1
+    elif ((rc == 1)); then
+        if ((!allow_browser)); then
+            msg 'JLDG account is not registered. Run in a terminal: jldg-auth'
+            return 1
+        fi
+        register_account || return 1
+    else
+        load_account
+        rc=$?
+        if ((rc == 0)); then
+            msg 'JLDG is ready.'
+            return 0
+        fi
+        if ((diagnostic_rc != DIAG_RT_REJECTED || !allow_browser)); then
+            failure_guidance
+            return "$rc"
+        fi
+        reauthenticate_account || return 1
+    fi
+
+    # After browser authentication, reuse the token normally created by
+    # oidc-gen; this also verifies the account without forcing a refresh.
+    check_token
+    rc=$?
+    if ((rc != 0)); then
+        failure_guidance
+        return "$rc"
+    fi
+    msg 'JLDG is ready.'
+}
+
+main() {
+    case $#:${1-} in
+        1:--help|1:-h)
+            printf '%s\n' "$USAGE" \
+                'Without arguments: prepare JLDG in a terminal; register or reauthenticate only when needed.' \
+                '--no-browser: load and check an account; guide instead of registering or reauthenticating.' \
+                '--token: return a token for Gfarm; never load accounts or start browser authentication.'
+            ;;
+        1:--token) token_mode ;;
+        1:--no-browser) prepare_mode 0 ;;
+        0:) prepare_mode 1 ;;
+        *)
+            msg "$USAGE"
+            return 2
+            ;;
+    esac
 }
 
 main "$@"
