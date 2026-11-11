@@ -210,6 +210,57 @@ Gfarm 管理者は、TLS、XOAUTH2、信頼する issuer、要求する audience
 
 環境設定スクリプト（`jldg-env.sh`・`jldg-env.csh`）は、配置先を `PATH` に加え、`JWT_USER_PATH` を `!jldg-auth --token` に設定する。agent の操作は行わない。配置先を変更した場合は、利用者が source の前に環境変数 `JLDG_HELPER_DIR` にそのパスを設定する（既定は `/usr/local/jldg`）。
 
+### 3.7 ホームを複数の実行ホストで共有する場合
+
+NFS 等でホームを共有する複数の実行ホストでは、oidc-agent の保存先（通常 `~/.config/oidc-agent`）も共有される。一方、agent はホストごとに動き、更新時には読み込み済みのメモリ上の RT を使う。OP は更新のたびに RT を再発行し、古い RT を失効させる（2.2節）。そのため、あるホストで更新すると、ほかのホストの agent が持つ RT が失効し、そのホストでは `invalid_grant`（`Refresh token has been revoked`）となる。どのホストが拒否されるかは、更新と読み込みの順序で入れ替わる。
+
+この構成では、ホストごとに異なるディレクトリを `OIDC_CONFIG_DIR` に設定し、RT をホストごとに持たせる。設定の方法は拠点の構成に合わせて決め、次の点に注意する。
+
+- agent は、更新された RT を、自身の起動時の環境の `OIDC_CONFIG_DIR` に書き込む。agent が起動される前に、利用者のすべてのログイン環境で設定されるようにする（システムのログイン設定など）。設定前に起動した agent は、停止してから起動し直す。
+- oidc-agent 5.3.6 は、`OIDC_CONFIG_DIR` のディレクトリが存在しないと、警告せずに標準の保存先を使う。ディレクトリは事前に作成し、利用者本人の所有・0700 とする。
+- ホスト名など、ホストを区別する値は、ホストごとに異なり、変わらないものを使う。値が変わると保存先が変わり、そのホストで初回登録をやり直す必要がある。
+- アカウントは保存先ごとに作られるので、利用者は実行ホストごとに初回登録を行う。利用者にはそのことを案内する。
+
+次は、`/etc/profile.d` に置いて全利用者のログイン時に設定する例である。ホームの下に `~/.config/oidc-agent-hosts/ホスト名` を作成し、作成できた場合だけ `OIDC_CONFIG_DIR` に設定する。利用者がすでに `OIDC_CONFIG_DIR` を設定していれば変更しない。作成に失敗した場合は、mkdir のエラーが表示される。
+
+Bash などの sh 系（`/etc/profile.d/oidc-agent-per-host.sh`）：
+
+```sh
+if [ -z "${OIDC_CONFIG_DIR-}" ] && [ -n "${HOME-}" ]; then
+    _oidc_dir=$HOME/.config/oidc-agent-hosts/$(uname -n)
+    if (umask 077 && mkdir -p "$_oidc_dir"); then
+        OIDC_CONFIG_DIR=$_oidc_dir
+        export OIDC_CONFIG_DIR
+    fi
+    unset _oidc_dir
+fi
+```
+
+tcsh（`/etc/profile.d/oidc-agent-per-host.csh`）：
+
+```csh
+if ( ! $?OIDC_CONFIG_DIR ) then
+    set _oidc_dir = "$HOME/.config/oidc-agent-hosts/`uname -n`"
+    ( umask 077; mkdir -p "$_oidc_dir" )
+    if ( $status == 0 ) then
+        setenv OIDC_CONFIG_DIR "$_oidc_dir"
+    endif
+    unset _oidc_dir
+endif
+```
+
+上の内容でそれぞれファイルを作成し、root 所有・0644 で配置する。
+
+```bash
+sudo install -o root -g root -m 0644 oidc-agent-per-host.sh oidc-agent-per-host.csh /etc/profile.d/
+```
+
+- `/etc/profile.d` のファイルは、ログインしたすべての利用者に適用され、各利用者のホームにディレクトリが作られる。対象を限定したい場合は、条件を追加する。
+- `/etc/profile.d/*.csh` を tcsh のログイン時に読み込むかどうかは、ディストリビューションによって異なる（Debian 系では既定で読み込まない場合がある）。読み込まれない場合は、`/etc/csh.login` 等から読み込むようにする。
+- ログインシェル以外で起動した agent（cron、systemd 等）には適用されない。
+
+設定後は、各ホストにログインし直して `printenv OIDC_CONFIG_DIR` がホストごとに異なることを確認する。各ホストで初回登録を済ませた後、一方のホストで `oidc-token --force-new jldg >/dev/null` を実行し、もう一方のホストで `oidc-token --force-new jldg >/dev/null` も成功することを確認する。
+
 ## 4. インストール後の静的確認
 
 実行ホスト上で、agent を起動せずに確認する。
@@ -514,7 +565,8 @@ printf 'token after prepare status=%s\n' "$?"
 | トークン取得は成功し Gfarm は失敗する | TLS・CA、XOAUTH2、issuer・audience・scope、ユーザー名の対応付け、利用権限 |
 | Gfarm は成功するが jldg-auth --token を使っていないように見える | ほかの認証方式へのフォールバック、`sasl_password`、`GFARM_SASL_PASSWORD`、別の環境変数設定 |
 | ほかの端末で停止した後に接続できない | agent の共有。ほかの端末に残った環境変数は解除されないので、利用者の標準手順で接続し直し、必要なら読み込み直す |
-| 停止・再起動後に更新に失敗する | `pw-store`、OP の RT ローテーション方針、利用者側の issuer 設定、ホームを共有する別ホストからの利用 |
+| 停止・再起動後に更新に失敗する | `pw-store`、OP の RT ローテーション方針、利用者側の issuer 設定、ホームを共有する別ホストからの利用（3.7節） |
+| ホームを共有する複数ホストのうち、一部のホストだけで `invalid_grant` になる | RT の共有によるローテーションの競合。ホストごとの `OIDC_CONFIG_DIR` の設定、ディレクトリの有無、agent が設定後の環境で起動されたか（3.7節） |
 
 jldg-auth が表示するメッセージの一覧は [README](README.md) にある。調査記録には、コマンドのバージョン、実行ホスト、シェル、実施したケース、終了状態、必要なエラー文を残す。トークン本体、暗号化パスワード、復号したアカウント設定は記録しない。
 
@@ -526,7 +578,7 @@ jldg-auth が表示するメッセージの一覧は [README](README.md) にあ�
 
 同じアカウントの初回登録・ブラウザ再認証は、複数の端末から同時に実行しない。認証処理や設定の保存が競合し、やり直しが必要になる場合がある。
 
-ホームを複数ホストで共有する場合は、暗号化ファイルと RT の共有範囲を OP のローテーション方針と合わせて決め、共有ファイルの同時更新を避ける運用を用意する。
+ホームを複数ホストで共有する場合は、3.7節に従って `OIDC_CONFIG_DIR` をホストごとに設定する。
 
 導入記録には、OS・oidc-agent/Gfarm の版、配置先、検証用利用者、対象の OP・クライアントと、次の結果を残す。
 
