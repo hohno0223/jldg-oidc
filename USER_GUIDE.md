@@ -143,14 +143,24 @@ Gfarm コマンドの実行中にブラウザ認証が始まることはあり�
 | `Cannot connect to oidc-agent.`、または `oidc-agent --status` がエラーになる | 2節の手順で接続し直す |
 | `JLDG account is not registered.` | 3節の初回登録を行う |
 | `JLDG reauthentication is required.` | 端末で `jldg-auth` を実行して再認証し、元の Gfarm コマンドをやり直す |
-| 暗号化パスワードが通らない | 初回登録で決めたパスワードを確認する。解消しなければ所属拠点の管理者に相談する |
+| 暗号化パスワードが通らない | 入力ミスを確認する。思い出せない場合は、下の手順でアカウントを削除し、初回登録をやり直す |
 | `JLDG account registration did not complete.` または `JLDG reauthentication did not complete.` | 表示されたエラーを確認する。ブラウザでの本人確認より前に Enter を押していないか、SSH 転送・ポート・プロキシ設定を確認し、`jldg-auth` をやり直す |
-| ブラウザで認証ページを開けない | 転送用の SSH が接続中か、ブラウザのプロキシ設定を確認する。名前解決のエラーが出る場合は、ブラウザのプロキシ設定で「SOCKS v5 を使用するときは DNS もプロキシーを使用する」を有効にする |
+| ブラウザで認証ページを開けない | 転送用の SSH が接続中か、ブラウザのプロキシ設定を確認する |
 | ブラウザでユーザ証明書を選べない／証明書が期限切れ | ユーザ証明書のインポートと有効期限を確認する。更新・再発行は [JLDG ウェブページ](https://www.jldg.org/jldg/)の利用手引きを参照する |
 | ブラウザで認証した後も、元の端末の処理が進まない | Enter 待ちになっていないか、SSH の `-L` のポートと接続先、ブラウザのプロキシ設定を確認する |
 | `JLDG: Communication with oidc-agent was interrupted` | agent との通信が途中で切れた状態。パスワード誤りや期限切れとは限らない。続けて表示される案内に従って agent の接続とネットワークを確認し、`jldg-auth` をやり直す |
 | `JLDG operation failed.`、`JLDG token retrieval failed.` | その上に表示された元のエラーを確認し、ネットワークの復旧後に `jldg-auth` をやり直す |
 | `JLDG is ready.` の後も Gfarm が失敗する | 利用権限や Gfarm の設定について所属拠点の管理者に確認する |
+
+暗号化パスワードを忘れた場合は、保存済みのアカウントを削除して、3節の初回登録をやり直します。2節の接続の後に、次を順に実行します（両シェル共通）。
+
+```bash
+oidc-add -r jldg
+rm -i ~/.config/oidc-agent/jldg
+jldg-auth
+```
+
+1行目は、agent に読み込まれたアカウントを外します。パスワードは不要で、読み込まれていない場合はエラーが表示されますが、そのまま次へ進みます。2行目で保存済みのアカウントを削除します。`printenv OIDC_CONFIG_DIR` でディレクトリが表示される場合は、`~/.config/oidc-agent` の代わりにそのディレクトリの `jldg` を削除します。この順序で実行してください。3行目の `jldg-auth` で、ブラウザ認証と新しい暗号化パスワードの設定を行います。
 
 状態を確認したい場合は、次のコマンドを使えます。
 
